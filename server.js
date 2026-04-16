@@ -7,7 +7,13 @@ const { Resend } = require('resend')
 const resend = new Resend(process.env.RESEND_API_KEY)
 const app = express()
 
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }))
+app.use(cors({
+  origin: ['https://hire-it-one.vercel.app', 'https://hireitnow.au', 'https://www.hireitnow.au', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}))
+
+app.options('*', cors())
 app.use('/webhook', express.raw({ type: 'application/json' }))
 app.use(express.json())
 
@@ -16,10 +22,11 @@ const PLATFORM_FEE_PERCENT = 0.15
 // ── Health check ──────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok' }))
 
-// ── Send booking notification email ──────────────────────
+// ── Send booking notification email to owner ──────────────
 app.post('/notify-booking', async (req, res) => {
   try {
     const { ownerEmail, ownerName, hirerName, itemTitle, startDate, hours, total } = req.body
+    console.log('Sending booking notification to:', ownerEmail)
     await resend.emails.send({
       from: 'HireIt <hello@hireitnow.au>',
       to: ownerEmail,
@@ -48,6 +55,7 @@ app.post('/notify-booking', async (req, res) => {
         </div>
       `
     })
+    console.log('Email sent successfully to:', ownerEmail)
     res.json({ success: true })
   } catch (err) {
     console.error('Email error:', err)
