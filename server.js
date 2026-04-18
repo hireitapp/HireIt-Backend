@@ -213,6 +213,40 @@ app.post('/stripe/connect/dashboard', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
-
+app.post('/notify-review', async (req, res) => {
+  try {
+    const { recipientEmail, recipientName, reviewerName, rating, comment, itemTitle } = req.body
+    await resend.emails.send({
+      from: 'HireIt <hello@hireitnow.au>',
+      to: recipientEmail,
+      subject: `You received a ${rating}⭐ review on HireIt!`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #3B6D11; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
+          </div>
+          <div style="padding: 30px; background: #f9f9f9;">
+            <h2 style="color: #3B6D11;">You got a new review! ⭐</h2>
+            <p>Hi ${recipientName},</p>
+            <p><strong>${reviewerName}</strong> left you a ${rating}-star review for <strong>${itemTitle}</strong>.</p>
+            <div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
+              <div style="font-size: 24px; margin-bottom: 8px;">${'⭐'.repeat(rating)}</div>
+              <p style="margin: 0; font-style: italic;">"${comment}"</p>
+            </div>
+            <a href="https://hireitnow.au/profile" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View your profile</a>
+          </div>
+          <div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
+            <p>HireIt — Hire anything, from anyone near you</p>
+            <p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
+          </div>
+        </div>
+      `
+    })
+    res.json({ success: true })
+  } catch (err) {
+    console.error('Review email error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`HireIt backend running on port ${PORT}`))
