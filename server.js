@@ -1,8 +1,10 @@
-if (process.env.NODE_ENV !== 'production') require('dotenv').config()
+require('dotenv').config()
 const express = require('express')
-const stripe = require('stripe')('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')const cors = require('cors')
+const cors = require('cors')
 const { Resend } = require('resend')
 
+const STRIPE_KEY = process.env.STRIPE_SECRET_KEY
+const stripe = require('stripe')(STRIPE_KEY)
 const resend = new Resend(process.env.RESEND_API_KEY)
 const app = express()
 
@@ -18,10 +20,8 @@ app.use(express.json())
 
 const PLATFORM_FEE_PERCENT = 0.15
 
-// ── Health check ──────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok' }))
+app.get('/health', (req, res) => res.json({ status: 'ok', stripeKeyPrefix: STRIPE_KEY?.slice(0,10) }))
 
-// ── Send booking notification email to owner ──────────────
 app.post('/notify-booking', async (req, res) => {
   try {
     const { ownerEmail, ownerName, hirerName, itemTitle, startDate, hours, total } = req.body
@@ -62,7 +62,6 @@ app.post('/notify-booking', async (req, res) => {
   }
 })
 
-// ── Send booking confirmation to hirer ────────────────────
 app.post('/confirm-booking', async (req, res) => {
   try {
     const { hirerEmail, hirerName, itemTitle, ownerName, startDate, hours, total } = req.body
@@ -106,7 +105,6 @@ app.post('/confirm-booking', async (req, res) => {
   }
 })
 
-// ── Stripe Connect onboarding ─────────────────────────────
 app.post('/stripe/connect/onboard', async (req, res) => {
   try {
     const { userId, email } = req.body
@@ -134,7 +132,6 @@ app.post('/stripe/connect/onboard', async (req, res) => {
   }
 })
 
-// ── Check Connect account status ──────────────────────────
 app.get('/stripe/connect/status/:accountId', async (req, res) => {
   try {
     const account = await stripe.accounts.retrieve(req.params.accountId)
@@ -148,7 +145,6 @@ app.get('/stripe/connect/status/:accountId', async (req, res) => {
   }
 })
 
-// ── Create Payment Intent ─────────────────────────────────
 app.post('/stripe/payment-intent', async (req, res) => {
   try {
     const { amountAUD, depositAUD, ownerStripeId, bookingId, listingTitle } = req.body
@@ -172,7 +168,6 @@ app.post('/stripe/payment-intent', async (req, res) => {
   }
 })
 
-// ── Stripe Webhook ────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature']
   let event
@@ -202,7 +197,6 @@ app.post('/webhook', async (req, res) => {
   res.json({ received: true })
 })
 
-// ── Owner dashboard link ──────────────────────────────────
 app.post('/stripe/connect/dashboard', async (req, res) => {
   try {
     const { accountId } = req.body
