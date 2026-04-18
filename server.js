@@ -20,7 +20,7 @@ app.use(express.json())
 
 const PLATFORM_FEE_PERCENT = 0.15
 
-app.get('/health', (req, res) => res.json({ status: 'ok', stripeKeyPrefix: STRIPE_KEY?.slice(0,20) }))
+app.get('/health', (req, res) => res.json({ status: 'ok', stripeKeyPrefix: STRIPE_KEY?.slice(0,15), stripekeySuffix: STRIPE_KEY?.slice(-4) }))
 
 app.post('/notify-booking', async (req, res) => {
   try {
