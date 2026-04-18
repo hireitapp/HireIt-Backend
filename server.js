@@ -3,8 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const { Resend } = require('resend')
 
-const STRIPE_KEY = process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY
-const stripe = require('stripe')(STRIPE_KEY)
+const getStripe = () => require('stripe')(process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY)
 const resend = new Resend(process.env.RESEND_API_KEY)
 const app = express()
 
@@ -20,7 +19,10 @@ app.use(express.json())
 
 const PLATFORM_FEE_PERCENT = 0.15
 
-app.get('/health', (req, res) => res.json({ status: 'ok', stripeKeyPrefix: STRIPE_KEY?.slice(0,15), stripekeySuffix: STRIPE_KEY?.slice(-4) }))
+app.get('/health', (req, res) => {
+  const key = process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY
+  res.json({ status: 'ok', stripeKeyPrefix: key?.slice(0,15), stripekeySuffix: key?.slice(-4) })
+})
 
 app.post('/notify-booking', async (req, res) => {
   try {
@@ -107,6 +109,7 @@ app.post('/confirm-booking', async (req, res) => {
 
 app.post('/stripe/connect/onboard', async (req, res) => {
   try {
+    const stripe = getStripe()
     const { userId, email } = req.body
     const account = await stripe.accounts.create({
       type: 'express',
@@ -134,6 +137,7 @@ app.post('/stripe/connect/onboard', async (req, res) => {
 
 app.get('/stripe/connect/status/:accountId', async (req, res) => {
   try {
+    const stripe = getStripe()
     const account = await stripe.accounts.retrieve(req.params.accountId)
     res.json({
       onboarded: account.details_submitted && account.charges_enabled,
@@ -147,6 +151,7 @@ app.get('/stripe/connect/status/:accountId', async (req, res) => {
 
 app.post('/stripe/payment-intent', async (req, res) => {
   try {
+    const stripe = getStripe()
     const { amountAUD, depositAUD, ownerStripeId, bookingId, listingTitle } = req.body
     const totalCents = Math.round(amountAUD * 100)
     const depositCents = Math.round(depositAUD * 100)
@@ -169,6 +174,7 @@ app.post('/stripe/payment-intent', async (req, res) => {
 })
 
 app.post('/webhook', async (req, res) => {
+  const stripe = getStripe()
   const sig = req.headers['stripe-signature']
   let event
   try {
@@ -199,6 +205,7 @@ app.post('/webhook', async (req, res) => {
 
 app.post('/stripe/connect/dashboard', async (req, res) => {
   try {
+    const stripe = getStripe()
     const { accountId } = req.body
     const loginLink = await stripe.accounts.createLoginLink(accountId)
     res.json({ url: loginLink.url })
