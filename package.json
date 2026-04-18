@@ -4,7 +4,7 @@
   "description": "HireIt Stripe backend server",
   "main": "server.js",
   "scripts": {
-    "start": "STRIPE_SECRET_KEY=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 node server.js",
+    "start": "STRIPE_SECRET_KEY=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 node server.js",
     "dev": "nodemon server.js"
   },
   "dependencies": {
