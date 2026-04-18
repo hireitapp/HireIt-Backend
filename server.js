@@ -248,5 +248,39 @@ app.post('/notify-review', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+app.post('/notify-dispute', async (req, res) => {
+  try {
+    const { hirerEmail, hirerName, ownerEmail, itemTitle, reason, bookingId, total } = req.body
+    await resend.emails.send({
+      from: 'HireIt <hello@hireitnow.au>',
+      to: 'ky@kcroofplumbing.com.au',
+      subject: `⚠️ Dispute filed — ${itemTitle}`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #A32D2D; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">HireIt — Dispute Alert</h1>
+          </div>
+          <div style="padding: 30px; background: #f9f9f9;">
+            <h2 style="color: #A32D2D;">⚠️ A problem has been reported</h2>
+            <div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
+              <p style="margin: 8px 0;"><strong>Item:</strong> ${itemTitle}</p>
+              <p style="margin: 8px 0;"><strong>Hirer:</strong> ${hirerName} (${hirerEmail})</p>
+              <p style="margin: 8px 0;"><strong>Owner email:</strong> ${ownerEmail}</p>
+              <p style="margin: 8px 0;"><strong>Total paid:</strong> $${total}</p>
+              <p style="margin: 8px 0;"><strong>Booking ID:</strong> ${bookingId}</p>
+              <p style="margin: 8px 0;"><strong>Problem:</strong> ${reason}</p>
+            </div>
+            <p>Log in to Supabase or Stripe to review this dispute and process a refund if applicable.</p>
+            <a href="https://hireitnow.au/admin" style="background:#A32D2D;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View admin dashboard</a>
+          </div>
+        </div>
+      `
+    })
+    res.json({ success: true })
+  } catch (err) {
+    console.error('Dispute email error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`HireIt backend running on port ${PORT}`))
