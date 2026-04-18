@@ -1,7 +1,6 @@
 if (process.env.NODE_ENV !== 'production') require('dotenv').config()
 const express = require('express')
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
-const cors = require('cors')
+const stripe = require('stripe')('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')const cors = require('cors')
 const { Resend } = require('resend')
 
 const resend = new Resend(process.env.RESEND_API_KEY)
