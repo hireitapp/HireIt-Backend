@@ -4,7 +4,7 @@
   "description": "HireIt Stripe backend server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node -e \"console.log('KEY_SUFFIX:', process.env.STRIPE_SECRET_KEY?.slice(-4))\" && node server.js",
     "dev": "nodemon server.js"
   },
   "dependencies": {
