@@ -282,5 +282,43 @@ app.post('/notify-dispute', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+app.post('/notify-offer', async (req, res) => {
+  try {
+    const { ownerEmail, ownerName, hirerName, itemTitle, offeredPrice, hours, hirePeriod, startDate, listedPrice } = req.body
+    await resend.emails.send({
+      from: 'HireIt <hello@hireitnow.au>',
+      to: ownerEmail,
+      subject: `💰 New offer on your ${itemTitle}`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #3B6D11; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
+          </div>
+          <div style="padding: 30px; background: #f9f9f9;">
+            <h2 style="color: #3B6D11;">💰 You received an offer!</h2>
+            <p>Hi ${ownerName},</p>
+            <p><strong>${hirerName}</strong> has made an offer on your <strong>${itemTitle}</strong>.</p>
+            <div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
+              <p style="margin: 8px 0;"><strong>Listed price:</strong> $${listedPrice}/hr</p>
+              <p style="margin: 8px 0;"><strong>Offered price:</strong> $${offeredPrice}/hr</p>
+              <p style="margin: 8px 0;"><strong>Start date:</strong> ${startDate}</p>
+              <p style="margin: 8px 0;"><strong>Duration:</strong> ${hours} ${hirePeriod}</p>
+            </div>
+            <p>Log in to HireIt to accept or decline this offer. Offer expires in 24 hours.</p>
+            <a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View offer</a>
+          </div>
+          <div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
+            <p>HireIt — Hire anything, from anyone near you</p>
+            <p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
+          </div>
+        </div>
+      `
+    })
+    res.json({ success: true })
+  } catch (err) {
+    console.error('Offer email error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`HireIt backend running on port ${PORT}`))
