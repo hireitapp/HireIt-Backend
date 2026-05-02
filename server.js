@@ -48,6 +48,7 @@ app.post('/notify-booking', async (req, res) => {
             </div>
             <p>Log in to HireIt to accept or decline this booking.</p>
             <a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View booking</a>
+<p style="font-size:13px;color:#888;margin-top:12px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>My Bookings</strong> to accept or decline.</p>
           </div>
           <div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
             <p>HireIt — Hire anything, from anyone near you</p>
@@ -92,6 +93,7 @@ app.post('/confirm-booking', async (req, res) => {
               <p style="margin: 8px 0 0; color: #BA7517; font-size: 14px;">Remember to arrange your own insurance for the hired item before collection. HireIt accepts no liability for any loss or damage.</p>
             </div>
             <a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View my bookings</a>
+<p style="font-size:13px;color:#888;margin-top:12px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>My Bookings</strong> to view your confirmed booking.</p>
           </div>
           <div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
             <p>HireIt — Hire anything, from anyone near you</p>
