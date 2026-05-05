@@ -3,7 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const { Resend } = require('resend')
 
-const getStripe = () => require('stripe')('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')
+const getStripe = () => require('stripe')(process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY)
 const resend = new Resend(process.env.RESEND_API_KEY)
 const app = express()
 
