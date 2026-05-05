@@ -20,7 +20,7 @@ app.use(express.json())
 const PLATFORM_FEE_PERCENT = 0.15
 
 app.get('/health', (req, res) => {
-const key = process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY
+const key = process.env.STRIPE_KEY || process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY
 res.json({ status: 'ok', stripeKeyPrefix: key?.slice(0,15), stripekeySuffix: key?.slice(-4) })
 })
 
