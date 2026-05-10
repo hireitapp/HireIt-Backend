@@ -19,6 +19,26 @@ app.use(express.json())
 
 const PLATFORM_FEE_PERCENT = 0.15
 
+// ── Branded email layout helper ──────────────────────────
+const emailLayout = (innerHtml) => `
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+<div style="background: linear-gradient(135deg, #2D3FCC 0%, #7B3FE4 100%); padding: 28px; text-align: center;">
+<h1 style="color: white; margin: 0; font-size: 30px; font-weight: 700; letter-spacing: -0.5px;">Hire<span style="color: #C9B6FF;">It</span></h1>
+</div>
+<div style="padding: 32px 28px; background: #F7F8FC;">
+${innerHtml}
+</div>
+<div style="padding: 24px; text-align: center; color: #888; font-size: 13px; background: #ffffff; border-top: 1px solid #eee;">
+<p style="margin: 0 0 6px;">HireIt — Hire anything, from anyone near you</p>
+<p style="margin: 0;"><a href="https://hireitnow.au" style="color: #2D3FCC; text-decoration: none; font-weight: 600;">hireitnow.au</a></p>
+</div>
+</div>
+`
+
+const ctaButton = (url, label) => `
+<a href="${url}" style="background: linear-gradient(135deg, #2D3FCC 0%, #7B3FE4 100%); color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; display: inline-block; margin-top: 16px; font-weight: 600; box-shadow: 0 4px 12px rgba(45, 63, 204, 0.25);">${label}</a>
+`
+
 app.get('/health', (req, res) => {
 const key = process.env.STRIPE_KEY || process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY
 res.json({ status: 'ok', stripeKeyPrefix: key?.slice(0,15), stripekeySuffix: key?.slice(-4) })
@@ -31,30 +51,19 @@ await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: ownerEmail,
 subject: `New booking request for ${itemTitle}`,
-html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #3B6D11; padding: 20px; text-align: center;">
-<h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
+html: emailLayout(`
+<h2 style="color: #0F1E4A; margin-top: 0;">New booking request!</h2>
+<p style="color: #333;">Hi ${ownerName},</p>
+<p style="color: #333;"><strong>${hirerName}</strong> wants to hire your <strong>${itemTitle}</strong>.</p>
+<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #2D3FCC;">
+<p style="margin: 8px 0; color: #333;"><strong>Start date:</strong> ${startDate}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Duration:</strong> ${hours} hours</p>
+<p style="margin: 8px 0; color: #333;"><strong>Total:</strong> $${total}</p>
 </div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #3B6D11;">New booking request!</h2>
-<p>Hi ${ownerName},</p>
-<p><strong>${hirerName}</strong> wants to hire your <strong>${itemTitle}</strong>.</p>
-<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
-<p style="margin: 8px 0;"><strong>Start date:</strong> ${startDate}</p>
-<p style="margin: 8px 0;"><strong>Duration:</strong> ${hours} hours</p>
-<p style="margin: 8px 0;"><strong>Total:</strong> $${total}</p>
-</div>
-<p>Log in to HireIt to accept or decline this booking.</p>
-<a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View booking</a>
-<p style="font-size:13px;color:#888;margin-top:12px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>My Bookings</strong> to accept or decline.</p>
-</div>
-<div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
-<p>HireIt — Hire anything, from anyone near you</p>
-<p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
-</div>
-</div>
-`
+<p style="color: #333;">Log in to HireIt to accept or decline this booking.</p>
+${ctaButton('https://hireitnow.au/my-bookings', 'View booking')}
+<p style="font-size: 13px; color: #888; margin-top: 16px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>My Bookings</strong> to accept or decline.</p>
+`)
 })
 res.json({ success: true })
 } catch (err) {
@@ -70,39 +79,28 @@ await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: hirerEmail,
 subject: `Booking confirmed — ${itemTitle}`,
-html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #3B6D11; padding: 20px; text-align: center;">
-<h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
+html: emailLayout(`
+<h2 style="color: #0F1E4A; margin-top: 0;">Booking confirmed! 🎉</h2>
+<p style="color: #333;">Hi ${hirerName},</p>
+<p style="color: #333;">Your booking for <strong>${itemTitle}</strong> has been confirmed by ${ownerName}.</p>
+<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #2D3FCC;">
+<p style="margin: 8px 0; color: #333;"><strong>Item:</strong> ${itemTitle}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Owner:</strong> ${ownerName}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Start date:</strong> ${startDate}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Duration:</strong> ${hours} hours</p>
+<p style="margin: 8px 0; color: #333;"><strong>Total:</strong> $${total}</p>
 </div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #3B6D11;">Booking confirmed! 🎉</h2>
-<p>Hi ${hirerName},</p>
-<p>Your booking for <strong>${itemTitle}</strong> has been confirmed by ${ownerName}.</p>
-<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
-<p style="margin: 8px 0;"><strong>Item:</strong> ${itemTitle}</p>
-<p style="margin: 8px 0;"><strong>Owner:</strong> ${ownerName}</p>
-<p style="margin: 8px 0;"><strong>Start date:</strong> ${startDate}</p>
-<p style="margin: 8px 0;"><strong>Duration:</strong> ${hours} hours</p>
-<p style="margin: 8px 0;"><strong>Total:</strong> $${total}</p>
+<div style="background: #EEF0FF; border-radius: 8px; padding: 16px; margin: 20px 0; border-left: 4px solid #2D3FCC;">
+<p style="margin: 0; color: #2D3FCC;"><strong>💳 Next step: Complete your payment</strong></p>
+<p style="margin: 8px 0 0; color: #2D3FCC; font-size: 14px;">Open the HireIt app and go to Messages to complete your payment and confirm pickup.</p>
 </div>
-<div style="background: #EAF3DE; border-radius: 8px; padding: 16px; margin: 20px 0;">
-<p style="margin: 0; color: #3B6D11;"><strong>💳 Next step: Complete your payment</strong></p>
-<p style="margin: 8px 0 0; color: #3B6D11; font-size: 14px;">Open the HireIt app and go to Messages to complete your payment and confirm pickup.</p>
-</div>
-<div style="background: #FAEEDA; border-radius: 8px; padding: 16px; margin: 20px 0;">
+<div style="background: #FAEEDA; border-radius: 8px; padding: 16px; margin: 20px 0; border-left: 4px solid #BA7517;">
 <p style="margin: 0; color: #BA7517;"><strong>⚠️ Insurance reminder</strong></p>
 <p style="margin: 8px 0 0; color: #BA7517; font-size: 14px;">Remember to arrange your own insurance for the hired item before collection. HireIt accepts no liability for any loss or damage.</p>
 </div>
-<a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View my bookings</a>
-<p style="font-size:13px;color:#888;margin-top:12px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>Messages</strong> to complete payment.</p>
-</div>
-<div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
-<p>HireIt — Hire anything, from anyone near you</p>
-<p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
-</div>
-</div>
-`
+${ctaButton('https://hireitnow.au/my-bookings', 'View my bookings')}
+<p style="font-size: 13px; color: #888; margin-top: 16px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>Messages</strong> to complete payment.</p>
+`)
 })
 res.json({ success: true })
 } catch (err) {
@@ -118,25 +116,14 @@ await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: ownerEmail,
 subject: `💳 Payment received for ${itemTitle}`,
-html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #3B6D11; padding: 20px; text-align: center;">
-<h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
-</div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #3B6D11;">💳 Payment received!</h2>
-<p>Hi ${ownerName},</p>
-<p><strong>${hirerName}</strong> has paid <strong>$${total}</strong> for <strong>${itemTitle}</strong>.</p>
-<p>Please arrange pickup details with them via the HireIt app.</p>
-<a href="https://hireitnow.au/messages" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View messages</a>
-<p style="font-size:13px;color:#888;margin-top:12px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>Messages</strong> to arrange pickup.</p>
-</div>
-<div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
-<p>HireIt — Hire anything, from anyone near you</p>
-<p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
-</div>
-</div>
-`
+html: emailLayout(`
+<h2 style="color: #0F1E4A; margin-top: 0;">💳 Payment received!</h2>
+<p style="color: #333;">Hi ${ownerName},</p>
+<p style="color: #333;"><strong>${hirerName}</strong> has paid <strong>$${total}</strong> for <strong>${itemTitle}</strong>.</p>
+<p style="color: #333;">Please arrange pickup details with them via the HireIt app.</p>
+${ctaButton('https://hireitnow.au/messages', 'View messages')}
+<p style="font-size: 13px; color: #888; margin-top: 16px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>Messages</strong> to arrange pickup.</p>
+`)
 })
 res.json({ success: true })
 } catch (err) {
@@ -152,25 +139,14 @@ await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: ownerEmail,
 subject: `📦 ${itemTitle} has been collected`,
-html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #3B6D11; padding: 20px; text-align: center;">
-<h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
-</div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #3B6D11;">📦 Item collected!</h2>
-<p>Hi ${ownerName},</p>
-<p><strong>${hirerName}</strong> has confirmed they have collected <strong>${itemTitle}</strong>.</p>
-<p>When the item is returned, mark the booking as complete in the HireIt app to release the deposit back to the hirer.</p>
-<a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View my bookings</a>
-<p style="font-size:13px;color:#888;margin-top:12px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>My Bookings</strong>.</p>
-</div>
-<div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
-<p>HireIt — Hire anything, from anyone near you</p>
-<p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
-</div>
-</div>
-`
+html: emailLayout(`
+<h2 style="color: #0F1E4A; margin-top: 0;">📦 Item collected!</h2>
+<p style="color: #333;">Hi ${ownerName},</p>
+<p style="color: #333;"><strong>${hirerName}</strong> has confirmed they have collected <strong>${itemTitle}</strong>.</p>
+<p style="color: #333;">When the item is returned, mark the booking as complete in the HireIt app to release the deposit back to the hirer.</p>
+${ctaButton('https://hireitnow.au/my-bookings', 'View my bookings')}
+<p style="font-size: 13px; color: #888; margin-top: 16px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>My Bookings</strong>.</p>
+`)
 })
 res.json({ success: true })
 } catch (err) {
@@ -293,27 +269,16 @@ await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: recipientEmail,
 subject: `You received a ${rating}⭐ review on HireIt!`,
-html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #3B6D11; padding: 20px; text-align: center;">
-<h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
-</div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #3B6D11;">You got a new review! ⭐</h2>
-<p>Hi ${recipientName},</p>
-<p><strong>${reviewerName}</strong> left you a ${rating}-star review for <strong>${itemTitle}</strong>.</p>
-<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
+html: emailLayout(`
+<h2 style="color: #0F1E4A; margin-top: 0;">You got a new review! ⭐</h2>
+<p style="color: #333;">Hi ${recipientName},</p>
+<p style="color: #333;"><strong>${reviewerName}</strong> left you a ${rating}-star review for <strong>${itemTitle}</strong>.</p>
+<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #7B3FE4;">
 <div style="font-size: 24px; margin-bottom: 8px;">${'⭐'.repeat(rating)}</div>
-<p style="margin: 0; font-style: italic;">"${comment}"</p>
+<p style="margin: 0; font-style: italic; color: #333;">"${comment}"</p>
 </div>
-<a href="https://hireitnow.au/profile" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View your profile</a>
-</div>
-<div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
-<p>HireIt — Hire anything, from anyone near you</p>
-<p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
-</div>
-</div>
-`
+${ctaButton('https://hireitnow.au/profile', 'View your profile')}
+`)
 })
 res.json({ success: true })
 } catch (err) {
@@ -330,22 +295,22 @@ from: 'HireIt <hello@hireitnow.au>',
 to: 'ky@kcroofplumbing.com.au',
 subject: `⚠️ Dispute filed — ${itemTitle}`,
 html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #A32D2D; padding: 20px; text-align: center;">
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+<div style="background: #A32D2D; padding: 28px; text-align: center;">
 <h1 style="color: white; margin: 0; font-size: 28px;">HireIt — Dispute Alert</h1>
 </div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #A32D2D;">⚠️ A problem has been reported</h2>
-<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
-<p style="margin: 8px 0;"><strong>Item:</strong> ${itemTitle}</p>
-<p style="margin: 8px 0;"><strong>Hirer:</strong> ${hirerName} (${hirerEmail})</p>
-<p style="margin: 8px 0;"><strong>Owner email:</strong> ${ownerEmail}</p>
-<p style="margin: 8px 0;"><strong>Total paid:</strong> $${total}</p>
-<p style="margin: 8px 0;"><strong>Booking ID:</strong> ${bookingId}</p>
-<p style="margin: 8px 0;"><strong>Problem:</strong> ${reason}</p>
+<div style="padding: 32px 28px; background: #F7F8FC;">
+<h2 style="color: #A32D2D; margin-top: 0;">⚠️ A problem has been reported</h2>
+<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #A32D2D;">
+<p style="margin: 8px 0; color: #333;"><strong>Item:</strong> ${itemTitle}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Hirer:</strong> ${hirerName} (${hirerEmail})</p>
+<p style="margin: 8px 0; color: #333;"><strong>Owner email:</strong> ${ownerEmail}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Total paid:</strong> $${total}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Booking ID:</strong> ${bookingId}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Problem:</strong> ${reason}</p>
 </div>
-<p>Log in to Supabase or Stripe to review this dispute and process a refund if applicable.</p>
-<a href="https://hireitnow.au/admin" style="background:#A32D2D;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View admin dashboard</a>
+<p style="color: #333;">Log in to Supabase or Stripe to review this dispute and process a refund if applicable.</p>
+<a href="https://hireitnow.au/admin" style="background: #A32D2D; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; display: inline-block; margin-top: 16px; font-weight: 600;">View admin dashboard</a>
 </div>
 </div>
 `
@@ -364,30 +329,19 @@ await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: ownerEmail,
 subject: `💰 New offer on your ${itemTitle}`,
-html: `
-<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-<div style="background: #3B6D11; padding: 20px; text-align: center;">
-<h1 style="color: white; margin: 0; font-size: 28px;">HireIt</h1>
+html: emailLayout(`
+<h2 style="color: #0F1E4A; margin-top: 0;">💰 You received an offer!</h2>
+<p style="color: #333;">Hi ${ownerName},</p>
+<p style="color: #333;"><strong>${hirerName}</strong> has made an offer on your <strong>${itemTitle}</strong>.</p>
+<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #2D3FCC;">
+<p style="margin: 8px 0; color: #333;"><strong>Listed price:</strong> $${listedPrice}/hr</p>
+<p style="margin: 8px 0; color: #333;"><strong>Offered price:</strong> $${offeredPrice}/hr</p>
+<p style="margin: 8px 0; color: #333;"><strong>Start date:</strong> ${startDate}</p>
+<p style="margin: 8px 0; color: #333;"><strong>Duration:</strong> ${hours} ${hirePeriod}</p>
 </div>
-<div style="padding: 30px; background: #f9f9f9;">
-<h2 style="color: #3B6D11;">💰 You received an offer!</h2>
-<p>Hi ${ownerName},</p>
-<p><strong>${hirerName}</strong> has made an offer on your <strong>${itemTitle}</strong>.</p>
-<div style="background: white; border-radius: 8px; padding: 20px; margin: 20px 0;">
-<p style="margin: 8px 0;"><strong>Listed price:</strong> $${listedPrice}/hr</p>
-<p style="margin: 8px 0;"><strong>Offered price:</strong> $${offeredPrice}/hr</p>
-<p style="margin: 8px 0;"><strong>Start date:</strong> ${startDate}</p>
-<p style="margin: 8px 0;"><strong>Duration:</strong> ${hours} ${hirePeriod}</p>
-</div>
-<p>Log in to HireIt to accept or decline this offer. Offer expires in 24 hours.</p>
-<a href="https://hireitnow.au/my-bookings" style="background:#3B6D11;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;display:inline-block;margin-top:16px;font-weight:bold;">View offer</a>
-</div>
-<div style="padding: 20px; text-align: center; color: #888; font-size: 13px;">
-<p>HireIt — Hire anything, from anyone near you</p>
-<p><a href="https://hireitnow.au" style="color: #3B6D11;">hireitnow.au</a></p>
-</div>
-</div>
-`
+<p style="color: #333;">Log in to HireIt to accept or decline this offer. Offer expires in 24 hours.</p>
+${ctaButton('https://hireitnow.au/my-bookings', 'View offer')}
+`)
 })
 res.json({ success: true })
 } catch (err) {
