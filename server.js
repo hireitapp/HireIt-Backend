@@ -97,15 +97,15 @@ ${infoCard([
 { label: 'Total', val: `$${total}` },
 ])}
 <div style="background: #E8EBFB; border-left: 4px solid #2D3FCC; border-radius: 8px; padding: 14px 16px; margin: 16px 0;">
-<p style="margin: 0; color: #2D3FCC; font-weight: 700;">💳 Next step: Complete your payment</p>
-<p style="margin: 6px 0 0; color: #5A6079; font-size: 14px;">Open the HireIt app and go to Messages to pay and arrange pickup.</p>
+<p style="margin: 0; color: #2D3FCC; font-weight: 700;">💳 Next step: Authorise your payment</p>
+<p style="margin: 6px 0 0; color: #5A6079; font-size: 14px;">Your card will be authorised (not charged) until the hire is complete. Go to Messages to authorise and arrange pickup.</p>
 </div>
 <div style="background: #FAEEDA; border-left: 4px solid #BA7517; border-radius: 8px; padding: 14px 16px; margin: 16px 0;">
 <p style="margin: 0; color: #BA7517; font-weight: 700;">⚠️ Insurance reminder</p>
 <p style="margin: 6px 0 0; color: #BA7517; font-size: 14px;">Arrange your own insurance for the hired item before collection. HireIt accepts no liability for any loss or damage.</p>
 </div>
 ${ctaButton('https://hireitnow.au/my-bookings', 'View my bookings')}
-<p style="font-size:13px;color:#8A8FA3;margin-top:16px;">👉 Open the <strong>HireIt app</strong> and go to <strong>Messages</strong> to complete payment.</p>
+<p style="font-size:13px;color:#8A8FA3;margin-top:16px;">👉 Open the <strong>HireIt app</strong> and go to <strong>Messages</strong> to authorise payment.</p>
 `
 await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
@@ -124,9 +124,9 @@ app.post('/notify-payment', async (req, res) => {
 try {
 const { ownerEmail, ownerName, hirerName, itemTitle, total } = req.body
 const body = `
-<h2 style="color: #0F1E4A; margin: 0 0 12px; font-size: 22px;">💳 Payment received!</h2>
+<h2 style="color: #0F1E4A; margin: 0 0 12px; font-size: 22px;">💳 Payment authorised!</h2>
 <p style="margin: 0 0 16px; color: #14172B;">Hi ${ownerName},</p>
-<p style="margin: 0 0 16px; color: #5A6079;"><strong>${hirerName}</strong> has paid <strong>$${total}</strong> for <strong>${itemTitle}</strong>.</p>
+<p style="margin: 0 0 16px; color: #5A6079;"><strong>${hirerName}</strong> has authorised payment of <strong>$${total}</strong> for <strong>${itemTitle}</strong>. Funds are held securely until the return is confirmed.</p>
 <p style="margin: 0 0 16px; color: #5A6079;">Please arrange pickup details with them via the HireIt app.</p>
 ${ctaButton('https://hireitnow.au/messages', 'View messages')}
 <p style="font-size:13px;color:#8A8FA3;margin-top:16px;">👉 Open the <strong>HireIt app</strong> on your phone and go to <strong>Messages</strong> to arrange pickup.</p>
@@ -134,7 +134,7 @@ ${ctaButton('https://hireitnow.au/messages', 'View messages')}
 await resend.emails.send({
 from: 'HireIt <hello@hireitnow.au>',
 to: ownerEmail,
-subject: `💳 Payment received for ${itemTitle}`,
+subject: `💳 Payment authorised for ${itemTitle}`,
 html: emailLayout(body),
 })
 res.json({ success: true })
@@ -327,6 +327,8 @@ res.status(500).json({ error: err.message })
 }
 })
 
+// ── Create Payment Intent (MANUAL CAPTURE - escrow) ──────
+// Card is AUTHORISED but NOT CHARGED until return is confirmed
 app.post('/stripe/payment-intent', async (req, res) => {
 try {
 const stripe = getStripe()
@@ -339,14 +341,82 @@ const paymentIntent = await stripe.paymentIntents.create({
 amount: totalCents,
 currency: 'aud',
 payment_method_types: ['card'],
+capture_method: 'manual',
 application_fee_amount: platformFeeCents,
 transfer_data: { destination: ownerStripeId },
-metadata: { bookingId, listingTitle, depositCents },
+metadata: { bookingId, listingTitle, depositCents: depositCents.toString() },
 description: `HireIt booking: ${listingTitle}`,
 })
-res.json({ clientSecret: paymentIntent.client_secret })
+res.json({ clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id })
 } catch (err) {
 console.error('Payment intent error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+// ── CAPTURE payment (release funds to owner) ─────────────
+app.post('/stripe/capture', async (req, res) => {
+try {
+const stripe = getStripe()
+const { paymentIntentId } = req.body
+if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' })
+const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId)
+console.log(`✅ Captured payment ${paymentIntentId}: $${paymentIntent.amount / 100}`)
+res.json({ success: true, status: paymentIntent.status, amount: paymentIntent.amount / 100 })
+} catch (err) {
+console.error('Capture error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+// ── CANCEL payment authorisation (no charge) ─────────────
+app.post('/stripe/cancel-payment', async (req, res) => {
+try {
+const stripe = getStripe()
+const { paymentIntentId } = req.body
+if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' })
+const paymentIntent = await stripe.paymentIntents.cancel(paymentIntentId)
+console.log(`🚫 Cancelled payment authorisation ${paymentIntentId}`)
+res.json({ success: true, status: paymentIntent.status })
+} catch (err) {
+console.error('Cancel payment error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+// ── PARTIAL CAPTURE (cancellation with fee) ──────────────
+app.post('/stripe/partial-capture', async (req, res) => {
+try {
+const stripe = getStripe()
+const { paymentIntentId, amountToCaptureAUD } = req.body
+if (!paymentIntentId || amountToCaptureAUD === undefined) {
+return res.status(400).json({ error: 'paymentIntentId and amountToCaptureAUD required' })
+}
+const amountToCaptureCents = Math.round(amountToCaptureAUD * 100)
+const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, {
+amount_to_capture: amountToCaptureCents,
+})
+console.log(`💰 Partial captured ${paymentIntentId}: $${amountToCaptureAUD}`)
+res.json({ success: true, status: paymentIntent.status, capturedAmount: amountToCaptureAUD })
+} catch (err) {
+console.error('Partial capture error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+// ── REFUND a captured payment ─────────────────────────────
+app.post('/stripe/refund', async (req, res) => {
+try {
+const stripe = getStripe()
+const { paymentIntentId, refundAmountAUD } = req.body
+if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' })
+const refundParams = { payment_intent: paymentIntentId }
+if (refundAmountAUD) refundParams.amount = Math.round(refundAmountAUD * 100)
+const refund = await stripe.refunds.create(refundParams)
+console.log(`💸 Refunded ${paymentIntentId}: $${(refund.amount / 100).toFixed(2)}`)
+res.json({ success: true, refundId: refund.id, amount: refund.amount / 100 })
+} catch (err) {
+console.error('Refund error:', err)
 res.status(500).json({ error: err.message })
 }
 })
@@ -361,13 +431,28 @@ event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK
 return res.status(400).send(`Webhook Error: ${err.message}`)
 }
 switch (event.type) {
+case 'payment_intent.amount_capturable_updated': {
+const pi = event.data.object
+console.log(`💳 Payment authorised (held in escrow): $${pi.amount / 100}`)
+break
+}
 case 'payment_intent.succeeded': {
 const pi = event.data.object
-console.log(`✅ Payment succeeded: $${pi.amount / 100}`)
+console.log(`✅ Payment captured: $${pi.amount / 100}`)
+break
+}
+case 'payment_intent.canceled': {
+const pi = event.data.object
+console.log(`🚫 Payment authorisation cancelled`)
 break
 }
 case 'payment_intent.payment_failed': {
 console.log(`❌ Payment failed`)
+break
+}
+case 'charge.refunded': {
+const charge = event.data.object
+console.log(`💸 Refund: $${charge.amount_refunded / 100}`)
 break
 }
 case 'account.updated': {
