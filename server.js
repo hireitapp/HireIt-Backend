@@ -16,6 +16,43 @@ const supabase = createClient(
   { auth: { persistSession: false, autoRefreshToken: false } }
 )
 
+// ── Auth middleware ────────────────────────────────────────
+// Verify the Supabase JWT in the Authorization header. Sets req.userId on
+// success. Returns 401 if the token is missing or invalid.
+async function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+  if (!token) return res.status(401).json({ error: 'Missing bearer token' })
+  const { data, error } = await supabase.auth.getUser(token)
+  if (error || !data?.user) return res.status(401).json({ error: 'Invalid token' })
+  req.userId = data.user.id
+  next()
+}
+
+// Look up the booking by Stripe PI id and assert the authenticated user is
+// either the hirer or the owner. Sends the response itself on failure and
+// returns null; on success returns the booking row.
+async function assertBookingParty(req, res, paymentIntentId) {
+  const { data: booking, error } = await supabase
+    .from('bookings')
+    .select('id, owner_id, hirer_id')
+    .eq('stripe_payment_intent_id', paymentIntentId)
+    .maybeSingle()
+  if (error) {
+    res.status(500).json({ error: 'Booking lookup failed' })
+    return null
+  }
+  if (!booking) {
+    res.status(404).json({ error: 'Booking not found' })
+    return null
+  }
+  if (req.userId !== booking.owner_id && req.userId !== booking.hirer_id) {
+    res.status(403).json({ error: 'Forbidden' })
+    return null
+  }
+  return booking
+}
+
 const resend = new Resend(process.env.RESEND_API_KEY)
 const app = express()
 
@@ -297,7 +334,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/stripe/connect/onboard', async (req, res) => {
+app.post('/stripe/connect/onboard', requireAuth, async (req, res) => {
 try {
 const stripe = getStripe()
 const { userId, email } = req.body
@@ -341,7 +378,7 @@ res.status(500).json({ error: err.message })
 
 // ── Create Payment Intent (MANUAL CAPTURE - escrow) ──────
 // Card is AUTHORISED but NOT CHARGED until return is confirmed
-app.post('/stripe/payment-intent', async (req, res) => {
+app.post('/stripe/payment-intent', requireAuth, async (req, res) => {
 try {
 const stripe = getStripe()
 const { amountAUD, depositAUD, ownerStripeId, bookingId, listingTitle } = req.body
@@ -366,27 +403,14 @@ res.status(500).json({ error: err.message })
 }
 })
 
-// ── CAPTURE payment (release funds to owner) ─────────────
-app.post('/stripe/capture', async (req, res) => {
-try {
-const stripe = getStripe()
-const { paymentIntentId } = req.body
-if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' })
-const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId)
-console.log(`✅ Captured payment ${paymentIntentId}: $${paymentIntent.amount / 100}`)
-res.json({ success: true, status: paymentIntent.status, amount: paymentIntent.amount / 100 })
-} catch (err) {
-console.error('Capture error:', err)
-res.status(500).json({ error: err.message })
-}
-})
-
 // ── CANCEL payment authorisation (no charge) ─────────────
-app.post('/stripe/cancel-payment', async (req, res) => {
+app.post('/stripe/cancel-payment', requireAuth, async (req, res) => {
 try {
 const stripe = getStripe()
 const { paymentIntentId } = req.body
 if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' })
+const booking = await assertBookingParty(req, res, paymentIntentId)
+if (!booking) return
 const paymentIntent = await stripe.paymentIntents.cancel(paymentIntentId)
 console.log(`🚫 Cancelled payment authorisation ${paymentIntentId}`)
 res.json({ success: true, status: paymentIntent.status })
@@ -397,13 +421,15 @@ res.status(500).json({ error: err.message })
 })
 
 // ── PARTIAL CAPTURE (cancellation with fee) ──────────────
-app.post('/stripe/partial-capture', async (req, res) => {
+app.post('/stripe/partial-capture', requireAuth, async (req, res) => {
 try {
 const stripe = getStripe()
 const { paymentIntentId, amountToCaptureAUD } = req.body
 if (!paymentIntentId || amountToCaptureAUD === undefined) {
 return res.status(400).json({ error: 'paymentIntentId and amountToCaptureAUD required' })
 }
+const booking = await assertBookingParty(req, res, paymentIntentId)
+if (!booking) return
 const amountToCaptureCents = Math.round(amountToCaptureAUD * 100)
 const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, {
 amount_to_capture: amountToCaptureCents,
@@ -412,23 +438,6 @@ console.log(`💰 Partial captured ${paymentIntentId}: $${amountToCaptureAUD}`)
 res.json({ success: true, status: paymentIntent.status, capturedAmount: amountToCaptureAUD })
 } catch (err) {
 console.error('Partial capture error:', err)
-res.status(500).json({ error: err.message })
-}
-})
-
-// ── REFUND a captured payment ─────────────────────────────
-app.post('/stripe/refund', async (req, res) => {
-try {
-const stripe = getStripe()
-const { paymentIntentId, refundAmountAUD } = req.body
-if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' })
-const refundParams = { payment_intent: paymentIntentId }
-if (refundAmountAUD) refundParams.amount = Math.round(refundAmountAUD * 100)
-const refund = await stripe.refunds.create(refundParams)
-console.log(`💸 Refunded ${paymentIntentId}: $${(refund.amount / 100).toFixed(2)}`)
-res.json({ success: true, refundId: refund.id, amount: refund.amount / 100 })
-} catch (err) {
-console.error('Refund error:', err)
 res.status(500).json({ error: err.message })
 }
 })
@@ -542,7 +551,7 @@ console.log(`  → updated booking ${dbResult.rows[0].id} (${dbResult.rows.lengt
 res.json({ received: true })
 })
 
-app.post('/stripe/connect/dashboard', async (req, res) => {
+app.post('/stripe/connect/dashboard', requireAuth, async (req, res) => {
 try {
 const stripe = getStripe()
 const { accountId } = req.body
