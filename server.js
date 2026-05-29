@@ -4,6 +4,18 @@ const cors = require('cors')
 const { Resend } = require('resend')
 
 const getStripe = () => require('stripe')(process.env.STRIPE_KEY || process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY)
+
+const { createClient } = require('@supabase/supabase-js')
+
+// Service-role client — bypasses RLS so the webhook can write to bookings
+// regardless of which user (or no user) is logged in. Service-role key is
+// for backend use only and must NEVER ship to the frontend.
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  { auth: { persistSession: false, autoRefreshToken: false } }
+)
+
 const resend = new Resend(process.env.RESEND_API_KEY)
 const app = express()
 
@@ -421,6 +433,27 @@ res.status(500).json({ error: err.message })
 }
 })
 
+// ── Webhook helper ─────────────────────────────────────────
+// Find the booking by Stripe PI id and apply `updates`. Returns one of:
+//   { result: 'updated', rows }  — at least one row mutated
+//   { result: 'noop' }            — no matching/eligible rows (idempotent re-fire or unknown PI)
+//   { result: 'error', error }    — Supabase error, caller should 500 so Stripe retries
+//
+// `extraFilters` is a function that can add filters like `.is('paid_at', null)`
+// to enforce first-write-only semantics. This avoids hitting the
+// `bookings_lock_immutable_columns` trigger when frontend has already
+// populated a write-once column.
+async function updateBookingByPI(piId, updates, extraFilters = (q) => q) {
+  if (!piId) return { result: 'noop' }
+  const query = extraFilters(
+    supabase.from('bookings').update(updates).eq('stripe_payment_intent_id', piId)
+  )
+  const { data, error } = await query.select()
+  if (error) return { result: 'error', error }
+  if (!data || data.length === 0) return { result: 'noop' }
+  return { result: 'updated', rows: data }
+}
+
 app.post('/webhook', async (req, res) => {
 const stripe = getStripe()
 const sig = req.headers['stripe-signature']
@@ -430,29 +463,59 @@ event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK
 } catch (err) {
 return res.status(400).send(`Webhook Error: ${err.message}`)
 }
+// Deterministic timestamp from Stripe — re-firing the same event yields
+// the same value, so duplicate updates are no-ops against the immutable
+// -column trigger (IS DISTINCT FROM returns false for equal values).
+const eventTime = new Date(event.created * 1000).toISOString()
+let dbResult = null
+
 switch (event.type) {
 case 'payment_intent.amount_capturable_updated': {
 const pi = event.data.object
 console.log(`💳 Payment authorised (held in escrow): $${pi.amount / 100}`)
+// First-write only via `.is('paid_at', null)`: if the frontend (Payment.js)
+// already populated paid_at, the immutable-column trigger would otherwise
+// reject this update. Filtering pre-empts that with a clean no-op.
+dbResult = await updateBookingByPI(pi.id, {
+payment_status: 'authorised',
+paid_at: eventTime,
+}, (q) => q.is('paid_at', null))
 break
 }
 case 'payment_intent.succeeded': {
 const pi = event.data.object
 console.log(`✅ Payment captured: $${pi.amount / 100}`)
+// First-write only on payment_captured_at — Messages.js:588 may already
+// have populated it when the owner agreed on return.
+dbResult = await updateBookingByPI(pi.id, {
+payment_status: 'captured',
+payment_captured_at: eventTime,
+}, (q) => q.is('payment_captured_at', null))
 break
 }
 case 'payment_intent.canceled': {
 const pi = event.data.object
 console.log(`🚫 Payment authorisation cancelled`)
+// Don't regress a captured payment back to "cancelled" — a separate
+// refund event handles post-capture reversal.
+dbResult = await updateBookingByPI(pi.id, {
+payment_status: 'cancelled',
+}, (q) => q.not('payment_status', 'in', '("captured","refunded")'))
 break
 }
 case 'payment_intent.payment_failed': {
 console.log(`❌ Payment failed`)
+// No DB write — payment_failed currently has no dedicated status.
+// Hirer is still on Payment.js and will see the Stripe error inline.
 break
 }
 case 'charge.refunded': {
 const charge = event.data.object
 console.log(`💸 Refund: $${charge.amount_refunded / 100}`)
+// PI id lives on the charge object, not on the event metadata.
+dbResult = await updateBookingByPI(charge.payment_intent, {
+payment_status: 'refunded',
+})
 break
 }
 case 'account.updated': {
@@ -463,6 +526,19 @@ break
 default:
 console.log(`Unhandled event: ${event.type}`)
 }
+
+// Inspect the DB result. Errors → 500 so Stripe retries (exponential backoff,
+// up to 3 days). Noop → success (idempotent re-fires shouldn't loop).
+if (dbResult?.result === 'error') {
+console.error('  ✗ Supabase update failed:', dbResult.error)
+return res.status(500).json({ error: 'DB update failed' })
+}
+if (dbResult?.result === 'noop') {
+console.log('  → noop: no eligible rows (already in target state or unknown PI)')
+} else if (dbResult?.result === 'updated') {
+console.log(`  → updated booking ${dbResult.rows[0].id} (${dbResult.rows.length} row${dbResult.rows.length === 1 ? '' : 's'})`)
+}
+
 res.json({ received: true })
 })
 
