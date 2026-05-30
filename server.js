@@ -416,7 +416,7 @@ console.log(`🚫 Cancelled payment authorisation ${paymentIntentId}`)
 res.json({ success: true, status: paymentIntent.status })
 } catch (err) {
 console.error('Cancel payment error:', err)
-res.status(500).json({ error: err.message })
+res.status(500).json({ error: err.message, code: err.code, paymentIntentStatus: err.payment_intent?.status })
 }
 })
 
@@ -438,7 +438,7 @@ console.log(`💰 Partial captured ${paymentIntentId}: $${amountToCaptureAUD}`)
 res.json({ success: true, status: paymentIntent.status, capturedAmount: amountToCaptureAUD })
 } catch (err) {
 console.error('Partial capture error:', err)
-res.status(500).json({ error: err.message })
+res.status(500).json({ error: err.message, code: err.code, paymentIntentStatus: err.payment_intent?.status })
 }
 })
 
