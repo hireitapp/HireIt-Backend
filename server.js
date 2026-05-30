@@ -380,22 +380,89 @@ res.status(500).json({ error: err.message })
 // Card is AUTHORISED but NOT CHARGED until return is confirmed
 app.post('/stripe/payment-intent', requireAuth, async (req, res) => {
 try {
+const { bookingId, listingTitle } = req.body
+if (!bookingId) return res.status(400).json({ error: 'bookingId required' })
+
+// Server-side source of truth for amounts and owner — never trust the client for money values.
+const { data: booking, error: bookingError } = await supabase
+.from('bookings')
+.select('id, hirer_id, owner_id, total_amount, deposit_amount, stripe_payment_intent_id')
+.eq('id', bookingId)
+.maybeSingle()
+if (bookingError) {
+console.error('Booking lookup failed:', bookingError)
+return res.status(500).json({ error: 'Booking lookup failed' })
+}
+if (!booking) return res.status(404).json({ error: 'Booking not found' })
+
+// Only the hirer may create a payment intent for this booking
+if (req.userId !== booking.hirer_id) return res.status(403).json({ error: 'Forbidden' })
+
 const stripe = getStripe()
-const { amountAUD, depositAUD, ownerStripeId, bookingId, listingTitle } = req.body
-const totalCents = Math.round(amountAUD * 100)
-const depositCents = Math.round(depositAUD * 100)
+
+// Idempotency: if a PI is already bound, branch on its current Stripe status.
+//   reusable status  → return the existing client_secret (retries land on the same PI)
+//   'succeeded'      → 409, this booking is already paid
+//   anything else (e.g. 'canceled') → fall through and create a fresh PI; the bind below
+//     will overwrite the stale id since the immutable-columns trigger does not lock it.
+//   retrieve throws  → fall through similarly.
+if (booking.stripe_payment_intent_id) {
+try {
+const existing = await stripe.paymentIntents.retrieve(booking.stripe_payment_intent_id)
+const reusable = ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing', 'requires_capture']
+if (reusable.includes(existing.status)) {
+return res.json({ clientSecret: existing.client_secret, paymentIntentId: existing.id })
+}
+if (existing.status === 'succeeded') {
+return res.status(409).json({ error: 'This booking has already been paid' })
+}
+console.log('Existing PI in non-reusable status, creating new:', existing.status)
+} catch (e) {
+console.error('Existing PI retrieve failed, creating new one:', e.message)
+}
+}
+
+// Look up the owner's Stripe Connect account server-side — never trust client-supplied ownerStripeId
+const { data: ownerProfile, error: ownerError } = await supabase
+.from('profiles')
+.select('stripe_account_id')
+.eq('id', booking.owner_id)
+.maybeSingle()
+if (ownerError) {
+console.error('Owner lookup failed:', ownerError)
+return res.status(500).json({ error: 'Owner lookup failed' })
+}
+if (!ownerProfile?.stripe_account_id) {
+return res.status(400).json({ error: 'Owner has not connected their payout account' })
+}
+
+// Derive amounts from the booking row, not from req.body
+const totalCents = Math.round((booking.total_amount || 0) * 100)
+const depositCents = Math.round((booking.deposit_amount || 0) * 100)
 const hireCents = totalCents - depositCents
 const platformFeeCents = Math.round(hireCents * PLATFORM_FEE_PERCENT)
+
 const paymentIntent = await stripe.paymentIntents.create({
 amount: totalCents,
 currency: 'aud',
 payment_method_types: ['card'],
 capture_method: 'manual',
 application_fee_amount: platformFeeCents,
-transfer_data: { destination: ownerStripeId },
+transfer_data: { destination: ownerProfile.stripe_account_id },
 metadata: { bookingId, listingTitle, depositCents: depositCents.toString() },
 description: `HireIt booking: ${listingTitle}`,
 })
+
+// Bind the PI to the booking server-side (consolidates the previously inconsistent frontend writes).
+// Failure here logs but does not fail the response: the PI is already created in Stripe.
+const { error: bindError } = await supabase
+.from('bookings')
+.update({ stripe_payment_intent_id: paymentIntent.id })
+.eq('id', bookingId)
+if (bindError) {
+console.error('Failed to bind PI to booking:', bindError)
+}
+
 res.json({ clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id })
 } catch (err) {
 console.error('Payment intent error:', err)
