@@ -465,7 +465,7 @@ if (!bookingId) return res.status(400).json({ error: 'bookingId required' })
 // Server-side source of truth for amounts and owner — never trust the client for money values.
 const { data: booking, error: bookingError } = await supabase
 .from('bookings')
-.select('id, hirer_id, owner_id, total_amount, deposit_amount, stripe_payment_intent_id, listings(country)')
+.select('id, hirer_id, owner_id, total_amount, deposit_amount, stripe_payment_intent_id, referral_credit_applied_at, listings(country)')
 .eq('id', bookingId)
 .maybeSingle()
 if (bookingError) {
@@ -504,7 +504,7 @@ console.error('Existing PI retrieve failed, creating new one:', e.message)
 // Look up the owner's Stripe Connect account server-side — never trust client-supplied ownerStripeId
 const { data: ownerProfile, error: ownerError } = await supabase
 .from('profiles')
-.select('stripe_account_id')
+.select('stripe_account_id, referral_fee_credits')
 .eq('id', booking.owner_id)
 .maybeSingle()
 if (ownerError) {
@@ -520,7 +520,20 @@ const currencyCode = getCurrencyCode(booking.listings?.country)
 const totalUnits = toSmallestUnit(booking.total_amount || 0, currencyCode)
 const depositUnits = toSmallestUnit(booking.deposit_amount || 0, currencyCode)
 const hireUnits = totalUnits - depositUnits
-const platformFeeUnits = Math.round(hireUnits * PLATFORM_FEE_PERCENT)
+
+// Referral fee discount: if the owner has unused referral credits, charge 10% instead of 15%
+// and consume one credit. Idempotent per booking: if a credit was already applied to this booking
+// (referral_credit_applied_at is set), apply the same 10% rate without decrementing again — so a
+// cancel-and-retry on the same booking re-creates the PI with the same discount.
+let feeRate = PLATFORM_FEE_PERCENT
+let consumeCredit = false
+if (booking.referral_credit_applied_at) {
+  feeRate = 0.10
+} else if ((ownerProfile.referral_fee_credits || 0) > 0) {
+  feeRate = 0.10
+  consumeCredit = true
+}
+const platformFeeUnits = Math.round(hireUnits * feeRate)
 
 const paymentIntent = await stripe.paymentIntents.create({
 amount: totalUnits,
@@ -541,6 +554,31 @@ const { error: bindError } = await supabase
 .eq('id', bookingId)
 if (bindError) {
 console.error('Failed to bind PI to booking:', bindError)
+}
+
+console.log(`💸 Fee rate ${feeRate} for booking ${bookingId} (${consumeCredit ? 'consuming credit' : booking.referral_credit_applied_at ? 'credit already applied on prior attempt' : 'no credit'})`)
+
+if (consumeCredit) {
+  try {
+    // Stamp the booking so a future retry (cancel-and-retry path) re-applies the same 10% rate
+    // without decrementing the owner's credit again.
+    await supabase
+      .from('bookings')
+      .update({ referral_credit_applied_at: new Date().toISOString() })
+      .eq('id', bookingId)
+    // Decrement the owner's credit. Read-modify-write with a .eq guard on the current value so
+    // a concurrent decrement on the same owner from another booking doesn't double-debit. If the
+    // guard fails (another decrement happened in the gap), the update affects zero rows — the
+    // owner keeps their credit and this booking is already stamped with the discount applied.
+    const currentCredits = ownerProfile.referral_fee_credits || 0
+    await supabase
+      .from('profiles')
+      .update({ referral_fee_credits: Math.max(0, currentCredits - 1) })
+      .eq('id', booking.owner_id)
+      .eq('referral_fee_credits', currentCredits)
+  } catch (e) {
+    console.error('Referral credit consume error (PI already created, payment proceeds):', e)
+  }
 }
 
 res.json({ clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id })
