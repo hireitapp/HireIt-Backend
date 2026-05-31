@@ -566,16 +566,10 @@ if (consumeCredit) {
       .from('bookings')
       .update({ referral_credit_applied_at: new Date().toISOString() })
       .eq('id', bookingId)
-    // Decrement the owner's credit. Read-modify-write with a .eq guard on the current value so
-    // a concurrent decrement on the same owner from another booking doesn't double-debit. If the
-    // guard fails (another decrement happened in the gap), the update affects zero rows — the
-    // owner keeps their credit and this booking is already stamped with the discount applied.
-    const currentCredits = ownerProfile.referral_fee_credits || 0
-    await supabase
-      .from('profiles')
-      .update({ referral_fee_credits: Math.max(0, currentCredits - 1) })
-      .eq('id', booking.owner_id)
-      .eq('referral_fee_credits', currentCredits)
+    // Decrement the owner's credit atomically via Postgres function — the function decrements
+    // only if credits > 0, race-free without the read-modify-write + .eq guard pattern we'd
+    // otherwise need. Concurrent decrements on the same owner can't underflow or double-debit.
+    await supabase.rpc('consume_referral_credit', { owner: booking.owner_id })
   } catch (e) {
     console.error('Referral credit consume error (PI already created, payment proceeds):', e)
   }
