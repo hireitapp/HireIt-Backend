@@ -35,7 +35,7 @@ async function requireAuth(req, res, next) {
 async function assertBookingParty(req, res, paymentIntentId) {
   const { data: booking, error } = await supabase
     .from('bookings')
-    .select('id, owner_id, hirer_id')
+    .select('id, owner_id, hirer_id, listings(country)')
     .eq('stripe_payment_intent_id', paymentIntentId)
     .maybeSingle()
   if (error) {
@@ -67,6 +67,52 @@ app.use('/webhook', express.raw({ type: 'application/json' }))
 app.use(express.json())
 
 const PLATFORM_FEE_PERCENT = 0.15
+
+// Country → Stripe currency-code map (lowercase). Kept in sync with
+// frontend lib/constants.js COUNTRY_CURRENCIES; update both if currencies change.
+const COUNTRY_CURRENCY_CODES = {
+  'Australia': 'aud',
+  'United States': 'usd',
+  'United Kingdom': 'gbp',
+  'Canada': 'cad',
+  'New Zealand': 'nzd',
+  'Europe': 'eur',
+  'Germany': 'eur',
+  'France': 'eur',
+  'Italy': 'eur',
+  'Spain': 'eur',
+  'Netherlands': 'eur',
+  'Japan': 'jpy',
+  'China': 'cny',
+  'India': 'inr',
+  'Singapore': 'sgd',
+  'Hong Kong': 'hkd',
+  'South Africa': 'zar',
+  'Brazil': 'brl',
+  'Mexico': 'mxn',
+  'UAE': 'aed',
+}
+
+const getCurrencyCode = (country) => COUNTRY_CURRENCY_CODES[country] || 'aud'
+
+// Stripe expects amounts in the smallest currency unit. Two-decimal currencies use × 100 (cents).
+// Zero-decimal currencies (JPY, KRW, etc.) use whole units — multiplying by 100 would charge 100×
+// the intended amount. Three-decimal currencies (BHD, KWD, OMR, TND, JOD) aren't in our currency
+// map; if added, extend this helper.
+// Source: https://docs.stripe.com/currencies#zero-decimal
+const ZERO_DECIMAL_CURRENCIES = new Set(['BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'])
+
+const toSmallestUnit = (amount, currencyCode) => {
+  return ZERO_DECIMAL_CURRENCIES.has(currencyCode.toUpperCase())
+    ? Math.round(amount)
+    : Math.round(amount * 100)
+}
+
+const fromSmallestUnit = (amount, currencyCode) => {
+  return ZERO_DECIMAL_CURRENCIES.has(currencyCode.toUpperCase())
+    ? amount
+    : amount / 100
+}
 
 function emailLayout(bodyHtml) {
 return `
@@ -386,7 +432,7 @@ if (!bookingId) return res.status(400).json({ error: 'bookingId required' })
 // Server-side source of truth for amounts and owner — never trust the client for money values.
 const { data: booking, error: bookingError } = await supabase
 .from('bookings')
-.select('id, hirer_id, owner_id, total_amount, deposit_amount, stripe_payment_intent_id')
+.select('id, hirer_id, owner_id, total_amount, deposit_amount, stripe_payment_intent_id, listings(country)')
 .eq('id', bookingId)
 .maybeSingle()
 if (bookingError) {
@@ -436,20 +482,21 @@ if (!ownerProfile?.stripe_account_id) {
 return res.status(400).json({ error: 'Owner has not connected their payout account' })
 }
 
-// Derive amounts from the booking row, not from req.body
-const totalCents = Math.round((booking.total_amount || 0) * 100)
-const depositCents = Math.round((booking.deposit_amount || 0) * 100)
-const hireCents = totalCents - depositCents
-const platformFeeCents = Math.round(hireCents * PLATFORM_FEE_PERCENT)
+// Derive amounts and currency from the booking row, not from req.body
+const currencyCode = getCurrencyCode(booking.listings?.country)
+const totalUnits = toSmallestUnit(booking.total_amount || 0, currencyCode)
+const depositUnits = toSmallestUnit(booking.deposit_amount || 0, currencyCode)
+const hireUnits = totalUnits - depositUnits
+const platformFeeUnits = Math.round(hireUnits * PLATFORM_FEE_PERCENT)
 
 const paymentIntent = await stripe.paymentIntents.create({
-amount: totalCents,
-currency: 'aud',
+amount: totalUnits,
+currency: currencyCode,
 payment_method_types: ['card'],
 capture_method: 'manual',
-application_fee_amount: platformFeeCents,
+application_fee_amount: platformFeeUnits,
 transfer_data: { destination: ownerProfile.stripe_account_id },
-metadata: { bookingId, listingTitle, depositCents: depositCents.toString() },
+metadata: { bookingId, listingTitle, depositCents: depositUnits.toString() },
 description: `HireIt booking: ${listingTitle}`,
 })
 
@@ -497,11 +544,15 @@ return res.status(400).json({ error: 'paymentIntentId and amountToCaptureAUD req
 }
 const booking = await assertBookingParty(req, res, paymentIntentId)
 if (!booking) return
-const amountToCaptureCents = Math.round(amountToCaptureAUD * 100)
+// Currency derived from booking.listings.country (which is what we used to set the PI's currency at
+// creation). Defensive alternative: stripe.paymentIntents.retrieve(piId).currency — tighter consistency
+// if listings.country were ever mutated after PI creation, but adds a round-trip to every cancel-with-fee.
+const currencyCode = getCurrencyCode(booking.listings?.country)
+const amountToCaptureUnits = toSmallestUnit(amountToCaptureAUD, currencyCode)
 const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, {
-amount_to_capture: amountToCaptureCents,
+amount_to_capture: amountToCaptureUnits,
 })
-console.log(`💰 Partial captured ${paymentIntentId}: $${amountToCaptureAUD}`)
+console.log(`💰 Partial captured ${paymentIntentId}: ${amountToCaptureAUD} ${currencyCode.toUpperCase()}`)
 res.json({ success: true, status: paymentIntent.status, capturedAmount: amountToCaptureAUD })
 } catch (err) {
 console.error('Partial capture error:', err)
@@ -548,7 +599,7 @@ let dbResult = null
 switch (event.type) {
 case 'payment_intent.amount_capturable_updated': {
 const pi = event.data.object
-console.log(`💳 Payment authorised (held in escrow): $${pi.amount / 100}`)
+console.log(`💳 Payment authorised (held in escrow): ${fromSmallestUnit(pi.amount, pi.currency)} ${pi.currency.toUpperCase()}`)
 // First-write only via `.is('paid_at', null)`: if the frontend (Payment.js)
 // already populated paid_at, the immutable-column trigger would otherwise
 // reject this update. Filtering pre-empts that with a clean no-op.
@@ -560,7 +611,7 @@ break
 }
 case 'payment_intent.succeeded': {
 const pi = event.data.object
-console.log(`✅ Payment captured: $${pi.amount / 100}`)
+console.log(`✅ Payment captured: ${fromSmallestUnit(pi.amount, pi.currency)} ${pi.currency.toUpperCase()}`)
 // First-write only on payment_captured_at — Messages.js:588 may already
 // have populated it when the owner agreed on return.
 dbResult = await updateBookingByPI(pi.id, {
@@ -587,7 +638,7 @@ break
 }
 case 'charge.refunded': {
 const charge = event.data.object
-console.log(`💸 Refund: $${charge.amount_refunded / 100}`)
+console.log(`💸 Refund: ${fromSmallestUnit(charge.amount_refunded, charge.currency)} ${charge.currency.toUpperCase()}`)
 // PI id lives on the charge object, not on the event metadata.
 dbResult = await updateBookingByPI(charge.payment_intent, {
 payment_status: 'refunded',
