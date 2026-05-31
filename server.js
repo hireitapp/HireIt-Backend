@@ -3,7 +3,36 @@ const express = require('express')
 const cors = require('cors')
 const { Resend } = require('resend')
 
-const getStripe = () => require('stripe')(process.env.STRIPE_KEY || process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY)
+// Stripe mode selector. Strict equality with 'test' — anything else (unset, empty, garbage, mixed-case)
+// resolves to 'live'. The default is live by construction; you have to type STRIPE_MODE=test exactly.
+const STRIPE_MODE = process.env.STRIPE_MODE === 'test' ? 'test' : 'live'
+
+// Resolve the Stripe secret key for the current mode. Live mode preserves the legacy fallback chain
+// for backwards-compatibility with today's deployed STRIPE_KEY env var. Test mode requires
+// STRIPE_KEY_TEST explicitly and refuses to fall back to live keys (lazy throw on first use).
+const getStripeSecretKey = () => {
+  if (STRIPE_MODE === 'test') {
+    const k = process.env.STRIPE_KEY_TEST
+    if (!k) throw new Error('STRIPE_MODE=test but STRIPE_KEY_TEST is not set — refusing to fall back to live keys.')
+    return k
+  }
+  return process.env.STRIPE_KEY_LIVE
+    || process.env.STRIPE_KEY
+    || process.env.HIREIT_STRIPE_KEY
+    || process.env.STRIPE_SECRET_KEY
+}
+
+// Resolve the Stripe webhook signing secret for the current mode. Same shape as the key resolver.
+const getStripeWebhookSecret = () => {
+  if (STRIPE_MODE === 'test') {
+    const s = process.env.STRIPE_WEBHOOK_SECRET_TEST
+    if (!s) throw new Error('STRIPE_MODE=test but STRIPE_WEBHOOK_SECRET_TEST is not set.')
+    return s
+  }
+  return process.env.STRIPE_WEBHOOK_SECRET_LIVE || process.env.STRIPE_WEBHOOK_SECRET
+}
+
+const getStripe = () => require('stripe')(getStripeSecretKey())
 
 const { createClient } = require('@supabase/supabase-js')
 
@@ -144,8 +173,12 @@ ${rows.map(r => `<p style="margin: 8px 0; color: #14172B;"><strong style="color:
 }
 
 app.get('/health', (req, res) => {
-const key = process.env.STRIPE_KEY || process.env.HIREIT_STRIPE_KEY || process.env.STRIPE_SECRET_KEY
-res.json({ status: 'ok', stripeKeyPrefix: key?.slice(0,15), stripekeySuffix: key?.slice(-4) })
+try {
+const key = getStripeSecretKey()
+res.json({ status: 'ok', mode: STRIPE_MODE, stripeKeyPrefix: key?.slice(0,15), stripeKeySuffix: key?.slice(-4) })
+} catch (e) {
+res.json({ status: 'ok', mode: STRIPE_MODE, stripeKeyError: e.message })
+}
 })
 
 app.post('/notify-booking', async (req, res) => {
@@ -586,7 +619,7 @@ const stripe = getStripe()
 const sig = req.headers['stripe-signature']
 let event
 try {
-event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET)
+event = stripe.webhooks.constructEvent(req.body, sig, getStripeWebhookSecret())
 } catch (err) {
 return res.status(400).send(`Webhook Error: ${err.message}`)
 }
