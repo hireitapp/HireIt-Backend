@@ -738,6 +738,24 @@ app.post('/stripe/connect/dashboard', requireAuth, async (req, res) => {
 try {
 const stripe = getStripe()
 const { accountId } = req.body
+if (!accountId) return res.status(400).json({ error: 'accountId required' })
+
+// Ownership check: the caller must own the Stripe account they're asking for a login link to.
+// Without this, any authenticated user who learns another user's stripe_account_id can request
+// a one-time login link to that user's Stripe Express dashboard.
+const { data: profile, error: profileError } = await supabase
+.from('profiles')
+.select('stripe_account_id')
+.eq('id', req.userId)
+.maybeSingle()
+if (profileError) {
+console.error('Profile lookup failed:', profileError)
+return res.status(500).json({ error: 'Profile lookup failed' })
+}
+if (!profile?.stripe_account_id || profile.stripe_account_id !== accountId) {
+return res.status(403).json({ error: 'Forbidden' })
+}
+
 const loginLink = await stripe.accounts.createLoginLink(accountId)
 res.json({ url: loginLink.url })
 } catch (err) {
