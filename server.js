@@ -181,7 +181,7 @@ res.json({ status: 'ok', mode: STRIPE_MODE, stripeKeyError: e.message })
 }
 })
 
-app.post('/notify-booking', async (req, res) => {
+app.post('/notify-booking', requireAuth, async (req, res) => {
 try {
 const { ownerEmail, ownerName, hirerName, itemTitle, startDate, hours, total } = req.body
 const body = `
@@ -210,7 +210,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/confirm-booking', async (req, res) => {
+app.post('/confirm-booking', requireAuth, async (req, res) => {
 try {
 const { hirerEmail, hirerName, itemTitle, ownerName, startDate, hours, total } = req.body
 const body = `
@@ -248,7 +248,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/notify-payment', async (req, res) => {
+app.post('/notify-payment', requireAuth, async (req, res) => {
 try {
 const { ownerEmail, ownerName, hirerName, itemTitle, total } = req.body
 const body = `
@@ -272,7 +272,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/notify-pickup', async (req, res) => {
+app.post('/notify-pickup', requireAuth, async (req, res) => {
 try {
 const { ownerEmail, ownerName, hirerName, itemTitle } = req.body
 const body = `
@@ -296,7 +296,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/notify-message', async (req, res) => {
+app.post('/notify-message', requireAuth, async (req, res) => {
 try {
 const { recipientEmail, recipientName, senderName, itemTitle, messagePreview, bookingId } = req.body
 if (!recipientEmail) return res.status(400).json({ error: 'recipientEmail required' })
@@ -328,7 +328,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/notify-review', async (req, res) => {
+app.post('/notify-review', requireAuth, async (req, res) => {
 try {
 const { recipientEmail, recipientName, reviewerName, rating, comment, itemTitle } = req.body
 const stars = '⭐'.repeat(rating)
@@ -355,7 +355,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/notify-dispute', async (req, res) => {
+app.post('/notify-dispute', requireAuth, async (req, res) => {
 try {
 const { hirerEmail, hirerName, ownerEmail, itemTitle, reason, bookingId, total } = req.body
 const body = `
@@ -384,7 +384,7 @@ res.status(500).json({ error: err.message })
 }
 })
 
-app.post('/notify-offer', async (req, res) => {
+app.post('/notify-offer', requireAuth, async (req, res) => {
 try {
 const { ownerEmail, ownerName, hirerName, itemTitle, offeredPrice, hours, hirePeriod, startDate, listedPrice } = req.body
 const body = `
