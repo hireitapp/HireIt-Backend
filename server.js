@@ -614,10 +614,15 @@ if (!booking) return
 // if listings.country were ever mutated after PI creation, but adds a round-trip to every cancel-with-fee.
 const currencyCode = getCurrencyCode(booking.listings?.country)
 const amountToCaptureUnits = toSmallestUnit(amountToCaptureAUD, currencyCode)
+// Recompute platform fee against captured forfeit (not full-hire amount baked at PI creation).
+// Same rate rule as PI creation: referral_credit_applied_at → 10%, else PLATFORM_FEE_PERCENT.
+const feeRate = booking.referral_credit_applied_at ? 0.10 : PLATFORM_FEE_PERCENT
+const platformFeeUnits = Math.round(amountToCaptureUnits * feeRate)
 const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, {
 amount_to_capture: amountToCaptureUnits,
+application_fee_amount: platformFeeUnits,
 })
-console.log(`💰 Partial captured ${paymentIntentId}: ${amountToCaptureAUD} ${currencyCode.toUpperCase()}`)
+console.log(`💰 Partial captured ${paymentIntentId}: ${amountToCaptureAUD} ${currencyCode.toUpperCase()} (fee ${feeRate * 100}%)`)
 res.json({ success: true, status: paymentIntent.status, capturedAmount: amountToCaptureAUD })
 } catch (err) {
 console.error('Partial capture error:', err)
