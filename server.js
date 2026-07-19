@@ -296,6 +296,44 @@ res.status(500).json({ error: err.message })
 }
 })
 
+app.post('/send-verification', requireAuth, async (req, res) => {
+try {
+const { data: userData, error: userErr } = await supabase.auth.admin.getUserById(req.userId)
+if (userErr || !userData?.user) return res.status(404).json({ error: 'User not found' })
+const email = userData.user.email
+const { data: prof } = await supabase.from('profiles').select('email_verified, full_name').eq('id', req.userId).single()
+if (prof?.email_verified) return res.json({ success: true, alreadyVerified: true })
+const { data: row, error: insErr } = await supabase.from('email_verifications').insert({ user_id: req.userId, email }).select('token').single()
+if (insErr) throw insErr
+const link = `${process.env.BACKEND_URL || ''}/verify-email?token=${row.token}`
+const body = `<h2>Confirm your email</h2><p>G'day ${prof?.full_name || 'there'},</p><p>Confirm your email address and your listing goes live straight away.</p><p><a href="${link}">Confirm my email</a></p><p>If the button doesn't work, copy this link into your browser:<br>${link}</p>`
+await resend.emails.send({ from: 'HireIt <hello@hireitnow.au>', to: email, subject: 'Confirm your email to publish your listing', html: emailLayout(body) })
+res.json({ success: true })
+} catch (err) {
+console.error('Send verification error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+app.get('/verify-email', async (req, res) => {
+const site = process.env.FRONTEND_URL || 'https://hireitnow.au'
+try {
+const { token } = req.query
+if (!token) return res.redirect(`${site}/verify-result?status=invalid`)
+const { data: row } = await supabase.from('email_verifications').select('*').eq('token', token).single()
+if (!row) return res.redirect(`${site}/verify-result?status=invalid`)
+if (row.used_at) return res.redirect(`${site}/verify-result?status=already`)
+if (new Date(row.expires_at) < new Date()) return res.redirect(`${site}/verify-result?status=expired`)
+await supabase.from('email_verifications').update({ used_at: new Date().toISOString() }).eq('token', token)
+await supabase.from('profiles').update({ email_verified: true }).eq('id', row.user_id)
+await supabase.from('listings').update({ status: 'active' }).eq('owner_id', row.user_id).eq('status', 'pending_verification')
+res.redirect(`${site}/verify-result?status=ok`)
+} catch (err) {
+console.error('Verify email error:', err)
+res.redirect(`${site}/verify-result?status=error`)
+}
+})
+
 app.post('/notify-message', requireAuth, async (req, res) => {
 try {
 const { recipientEmail, recipientName, senderName, itemTitle, messagePreview, bookingId } = req.body
