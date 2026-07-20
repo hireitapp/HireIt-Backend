@@ -64,7 +64,7 @@ async function requireAuth(req, res, next) {
 async function assertBookingParty(req, res, paymentIntentId) {
   const { data: booking, error } = await supabase
     .from('bookings')
-    .select('id, owner_id, hirer_id, listings(country)')
+    .select('id, owner_id, hirer_id, platform_fee, listings(country)')
     .eq('stripe_payment_intent_id', paymentIntentId)
     .maybeSingle()
   if (error) {
@@ -503,7 +503,7 @@ if (!bookingId) return res.status(400).json({ error: 'bookingId required' })
 // Server-side source of truth for amounts and owner — never trust the client for money values.
 const { data: booking, error: bookingError } = await supabase
 .from('bookings')
-.select('id, hirer_id, owner_id, total_amount, deposit_amount, stripe_payment_intent_id, referral_credit_applied_at, listings(country)')
+.select('id, hirer_id, owner_id, total_amount, deposit_amount, platform_fee, stripe_payment_intent_id, referral_credit_applied_at, listings(country)')
 .eq('id', bookingId)
 .maybeSingle()
 if (bookingError) {
