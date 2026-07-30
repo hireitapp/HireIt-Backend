@@ -542,15 +542,18 @@ console.error('Existing PI retrieve failed, creating new one:', e.message)
 // Look up the owner's Stripe Connect account server-side — never trust client-supplied ownerStripeId
 const { data: ownerProfile, error: ownerError } = await supabase
 .from('profiles')
-.select('stripe_account_id, referral_fee_credits')
+.select('stripe_account_id, stripe_charges_enabled, referral_fee_credits')
 .eq('id', booking.owner_id)
 .maybeSingle()
 if (ownerError) {
 console.error('Owner lookup failed:', ownerError)
 return res.status(500).json({ error: 'Owner lookup failed' })
 }
-if (!ownerProfile?.stripe_account_id) {
-return res.status(400).json({ error: 'Owner has not connected their payout account' })
+if (!ownerProfile?.stripe_account_id || !ownerProfile.stripe_charges_enabled) {
+return res.status(400).json({
+error: 'The owner has not finished setting up payments yet. Please message them.',
+code: 'owner_not_charges_enabled',
+})
 }
 
 // Derive amounts and currency from the booking row, not from req.body
@@ -689,6 +692,41 @@ async function updateBookingByPI(piId, updates, extraFilters = (q) => q) {
   return { result: 'updated', rows: data }
 }
 
+app.post('/stripe/connect/backfill-status', requireAuth, async (req, res) => {
+const { data: viewerProfile, error: viewerErr } = await supabase
+.from('profiles')
+.select('is_admin')
+.eq('id', req.userId)
+.single()
+if (viewerErr || !viewerProfile?.is_admin) return res.status(403).json({ error: 'Admin only' })
+
+const stripe = getStripe()
+const { data: profiles, error: fetchErr } = await supabase
+.from('profiles')
+.select('id, stripe_account_id')
+.not('stripe_account_id', 'is', null)
+if (fetchErr) return res.status(500).json({ error: fetchErr.message })
+
+const results = { checked: profiles.length, updated: 0, errors: [] }
+for (const p of profiles) {
+try {
+const account = await stripe.accounts.retrieve(p.stripe_account_id)
+const { error: updateErr } = await supabase
+.from('profiles')
+.update({
+stripe_charges_enabled: !!account.charges_enabled,
+stripe_payouts_enabled: !!account.payouts_enabled,
+})
+.eq('id', p.id)
+if (updateErr) throw updateErr
+results.updated += 1
+} catch (e) {
+results.errors.push({ id: p.id, message: e.message })
+}
+}
+res.json(results)
+})
+
 app.post('/webhook', async (req, res) => {
 const stripe = getStripe()
 const sig = req.headers['stripe-signature']
@@ -755,7 +793,18 @@ break
 }
 case 'account.updated': {
 const account = event.data.object
-console.log(`✅ Stripe Connect updated: ${account.id}`)
+console.log(`✅ Stripe Connect updated: ${account.id} (charges=${account.charges_enabled}, payouts=${account.payouts_enabled})`)
+const { error: updateError } = await supabase
+.from('profiles')
+.update({
+stripe_charges_enabled: !!account.charges_enabled,
+stripe_payouts_enabled: !!account.payouts_enabled,
+})
+.eq('stripe_account_id', account.id)
+if (updateError) {
+console.error('  ✗ Profile update failed:', updateError)
+return res.status(500).json({ error: 'DB update failed' })
+}
 break
 }
 default:
