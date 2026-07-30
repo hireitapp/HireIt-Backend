@@ -22,14 +22,27 @@ const getStripeSecretKey = () => {
     || process.env.STRIPE_SECRET_KEY
 }
 
-// Resolve the Stripe webhook signing secret for the current mode. Same shape as the key resolver.
-const getStripeWebhookSecret = () => {
+// Resolve the Stripe webhook signing secrets for the current mode. Returns an
+// array — the /webhook endpoint receives events from two Stripe destinations
+// (platform account + connected accounts), each with its own signing secret.
+// Verification tries each in order until one succeeds; 400 only if all fail.
+// The Connect secret is optional; if unset, only the primary is tried.
+const getStripeWebhookSecrets = () => {
+  const secrets = []
   if (STRIPE_MODE === 'test') {
-    const s = process.env.STRIPE_WEBHOOK_SECRET_TEST
-    if (!s) throw new Error('STRIPE_MODE=test but STRIPE_WEBHOOK_SECRET_TEST is not set.')
-    return s
+    const primary = process.env.STRIPE_WEBHOOK_SECRET_TEST
+    if (!primary) throw new Error('STRIPE_MODE=test but STRIPE_WEBHOOK_SECRET_TEST is not set.')
+    secrets.push(primary)
+    const connect = process.env.STRIPE_CONNECT_WEBHOOK_SECRET_TEST
+    if (connect) secrets.push(connect)
+  } else {
+    const primary = process.env.STRIPE_WEBHOOK_SECRET_LIVE || process.env.STRIPE_WEBHOOK_SECRET
+    if (!primary) throw new Error('No Stripe webhook secret configured for live mode.')
+    secrets.push(primary)
+    const connect = process.env.STRIPE_CONNECT_WEBHOOK_SECRET_LIVE || process.env.STRIPE_CONNECT_WEBHOOK_SECRET
+    if (connect) secrets.push(connect)
   }
-  return process.env.STRIPE_WEBHOOK_SECRET_LIVE || process.env.STRIPE_WEBHOOK_SECRET
+  return secrets
 }
 
 const getStripe = () => require('stripe')(getStripeSecretKey())
@@ -730,11 +743,20 @@ res.json(results)
 app.post('/webhook', async (req, res) => {
 const stripe = getStripe()
 const sig = req.headers['stripe-signature']
-let event
+const secrets = getStripeWebhookSecrets()
+let event = null
+let lastErr = null
+for (const secret of secrets) {
 try {
-event = stripe.webhooks.constructEvent(req.body, sig, getStripeWebhookSecret())
+event = stripe.webhooks.constructEvent(req.body, sig, secret)
+lastErr = null
+break
 } catch (err) {
-return res.status(400).send(`Webhook Error: ${err.message}`)
+lastErr = err
+}
+}
+if (!event) {
+return res.status(400).send(`Webhook Error: ${lastErr?.message || 'signature verification failed'}`)
 }
 // Deterministic timestamp from Stripe — re-firing the same event yields
 // the same value, so duplicate updates are no-ops against the immutable
