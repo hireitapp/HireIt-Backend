@@ -877,5 +877,169 @@ res.status(500).json({ error: err.message })
 }
 })
 
+// ── Welcome email (Supabase DB webhook on profiles INSERT) ───
+// Protected by x-webhook-secret header — set this value in both Supabase
+// webhook config and Railway env vars (WELCOME_WEBHOOK_SECRET).
+app.post('/welcome-email', async (req, res) => {
+const secret = req.headers['x-webhook-secret']
+if (!secret || secret !== process.env.WELCOME_WEBHOOK_SECRET) {
+return res.status(401).json({ error: 'Unauthorized' })
+}
+try {
+const { record, type } = req.body
+if (type !== 'INSERT' || !record?.id) {
+return res.status(400).json({ error: 'Expected INSERT event with record.id' })
+}
+
+// Email lives in auth.users, not profiles. Suburb is in user_metadata at
+// signup time because handle_new_user only copies id + full_name to profiles.
+const { data: userData, error: userError } = await supabase.auth.admin.getUserById(record.id)
+if (userError || !userData?.user) {
+console.error('Welcome email: user lookup failed:', userError)
+return res.status(500).json({ error: 'User not found' })
+}
+
+const email = userData.user.email
+const suburb = userData.user.user_metadata?.suburb || record.suburb || 'your area'
+const fullName = record.full_name || userData.user.user_metadata?.full_name || 'there'
+const firstName = fullName.split(' ')[0]
+// user_intent is always null at INSERT time (set later by Onboarding page)
+const userIntent = record.user_intent
+
+await resend.emails.send({
+from: 'HireIt <hello@hireitnow.au>',
+to: email,
+subject: `Welcome to HireIt, ${firstName}! 🎉`,
+html: emailLayout(buildWelcomeBody(firstName, suburb, userIntent)),
+})
+
+console.log(`📧 Welcome email sent to ${email} (suburb: ${suburb}, intent: ${userIntent || 'null'})`)
+res.json({ success: true })
+} catch (err) {
+console.error('Welcome email error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+function buildWelcomeBody(firstName, suburb, userIntent) {
+const listingPitch = userIntent === 'hire'
+? `Whenever you're ready, feel free to have a browse — whether you're after a tool, piece of equipment, or anything else, there's a good chance someone near you has it listed.`
+: `A listing will give you the No.1 Founding Lister badge for the area, so if you've got something you'd be happy to hire out, feel free to list it — free to sign up and list, and you set your own hire price.`
+return `
+<h2 style="color:#0F1E4A;margin:0 0 16px;font-size:22px;">Welcome to HireIt, ${firstName}! 🎉</h2>
+<p style="margin:0 0 16px;color:#14172B;">Hi ${firstName}, great to have you on board from ${suburb}.</p>
+<p style="margin:0 0 16px;color:#5A6079;">We're spreading the word and growing steadily across the country, and it'd be great to have ${suburb} as part of that. ${listingPitch}</p>
+<p style="margin:0 0 16px;color:#5A6079;">There's also a referral link in your profile dropdown if you'd like to invite friends or family — referring someone gets you a reduced platform fee on your next 3 hires once they complete their first.</p>
+<p style="margin:0 0 16px;color:#5A6079;">We're building a HireIt community, so if you have any questions, feedback or suggestions, please reach out directly. Thanks for being part of it early on!</p>
+${ctaButton('https://hireitnow.au', 'Explore HireIt')}
+<p style="margin:24px 0 0;color:#5A6079;font-size:14px;">— The HireIt Team</p>
+`
+}
+
+// ── Follow-up nudge (called daily by Vercel cron via x-cron-secret) ──
+// Sends a 3-day nudge to users who signed up 3–4 days ago and haven't yet
+// created a listing or made a booking. Idempotent: followup_email_sent flag
+// prevents double-sends even if the cron misfires or retries.
+app.post('/followup-nudge', async (req, res) => {
+const secret = req.headers['x-cron-secret']
+if (!secret || secret !== process.env.CRON_SECRET) {
+return res.status(401).json({ error: 'Unauthorized' })
+}
+try {
+const now = new Date()
+const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString()
+const fourDaysAgo = new Date(now.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString()
+
+// Rolling 24-hour window: created 3–4 days ago, nudge not yet sent
+const { data: profiles, error: profilesError } = await supabase
+.from('profiles')
+.select('id, full_name, suburb, user_intent')
+.eq('followup_email_sent', false)
+.gte('created_at', fourDaysAgo)
+.lt('created_at', threeDaysAgo)
+
+if (profilesError) throw profilesError
+if (!profiles?.length) return res.json({ sent: 0, skipped: 0, message: 'No eligible users in window' })
+
+// Exclude anyone who has already listed or booked — they're active
+const userIds = profiles.map(p => p.id)
+const [{ data: listers }, { data: bookers }] = await Promise.all([
+supabase.from('listings').select('owner_id').in('owner_id', userIds),
+supabase.from('bookings').select('hirer_id, owner_id')
+.or(`hirer_id.in.(${userIds.join(',')}),owner_id.in.(${userIds.join(',')})`),
+])
+
+const activeIds = new Set([
+...(listers || []).map(l => l.owner_id),
+...(bookers || []).map(b => b.hirer_id),
+...(bookers || []).map(b => b.owner_id),
+])
+
+let sent = 0
+let skipped = 0
+
+for (const profile of profiles) {
+if (activeIds.has(profile.id)) { skipped++; continue }
+
+try {
+const { data: userData } = await supabase.auth.admin.getUserById(profile.id)
+if (!userData?.user?.email) { skipped++; continue }
+
+const firstName = profile.full_name?.split(' ')[0] || 'there'
+await resend.emails.send({
+from: 'HireIt <hello@hireitnow.au>',
+to: userData.user.email,
+subject: `Still thinking about HireIt, ${firstName}?`,
+html: emailLayout(buildNudgeBody(firstName, profile.user_intent)),
+})
+
+await supabase.from('profiles').update({ followup_email_sent: true }).eq('id', profile.id)
+sent++
+console.log(`📧 Nudge sent to ${userData.user.email} (intent: ${profile.user_intent || 'null'})`)
+} catch (err) {
+console.error(`Nudge error for user ${profile.id}:`, err.message)
+skipped++
+}
+}
+
+res.json({ sent, skipped })
+} catch (err) {
+console.error('Followup nudge error:', err)
+res.status(500).json({ error: err.message })
+}
+})
+
+function buildNudgeBody(firstName, intent) {
+let mainContent
+if (intent === 'hire') {
+mainContent = `
+<p style="margin:0 0 16px;color:#14172B;">Hi ${firstName}, just checking in — still looking for something to hire?</p>
+<p style="margin:0 0 16px;color:#5A6079;">Take a look at what's available near you.</p>
+${ctaButton('https://hireitnow.au', 'Browse listings')}
+`
+} else if (intent === 'earn' || intent === 'both') {
+mainContent = `
+<p style="margin:0 0 16px;color:#14172B;">Hi ${firstName}, you haven't listed anything yet — even one item can start earning you a bit extra while it's not in use. Takes about 2 minutes.</p>
+${ctaButton('https://hireitnow.au/list-item', 'List an item')}
+`
+} else {
+mainContent = `
+<p style="margin:0 0 16px;color:#14172B;">Hi ${firstName}, just checking in on how you're finding HireIt so far.</p>
+<p style="margin:0 0 16px;color:#5A6079;">Whether you're after something to hire or want to list gear you're not using, it only takes a couple of minutes to get started.</p>
+<div>
+${ctaButton('https://hireitnow.au', 'Browse listings')}
+&nbsp;&nbsp;
+${ctaButton('https://hireitnow.au/list-item', 'List an item')}
+</div>
+`
+}
+return `
+<h2 style="color:#0F1E4A;margin:0 0 16px;font-size:22px;">Still thinking about HireIt, ${firstName}?</h2>
+${mainContent}
+<p style="margin:24px 0 0;color:#5A6079;font-size:14px;">Any questions, just reply to this email — happy to help.</p>
+<p style="margin:8px 0 0;color:#5A6079;font-size:14px;">— The HireIt Team</p>
+`
+}
+
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`HireIt backend running on port ${PORT}`))
