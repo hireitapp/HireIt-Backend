@@ -108,7 +108,7 @@ app.options('*', cors())
 app.use('/webhook', express.raw({ type: 'application/json' }))
 app.use(express.json())
 
-const PLATFORM_FEE_PERCENT = 0.15
+const PLATFORM_FEE_PERCENT = 0.12
 
 // Country → Stripe currency-code map (lowercase). Kept in sync with
 // frontend lib/constants.js COUNTRY_CURRENCIES; update both if currencies change.
@@ -575,7 +575,7 @@ const totalUnits = toSmallestUnit(booking.total_amount || 0, currencyCode)
 const depositUnits = toSmallestUnit(booking.deposit_amount || 0, currencyCode)
 const hireUnits = totalUnits - depositUnits
 
-// Referral fee discount: if the owner has unused referral credits, charge 10% instead of 15%
+// Referral fee discount: if the owner has unused referral credits, charge 10% instead of 12%
 // and consume one credit. Idempotent per booking: if a credit was already applied to this booking
 // (referral_credit_applied_at is set), apply the same 10% rate without decrementing again — so a
 // cancel-and-retry on the same booking re-creates the PI with the same discount.
