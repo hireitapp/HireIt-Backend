@@ -77,7 +77,7 @@ async function requireAuth(req, res, next) {
 async function assertBookingParty(req, res, paymentIntentId) {
   const { data: booking, error } = await supabase
     .from('bookings')
-    .select('id, owner_id, hirer_id, platform_fee, listings(country)')
+    .select('id, owner_id, hirer_id, platform_fee, referral_credit_applied_at, promo_fee_applied_at, listings(country)')
     .eq('stripe_payment_intent_id', paymentIntentId)
     .maybeSingle()
   if (error) {
@@ -516,7 +516,7 @@ if (!bookingId) return res.status(400).json({ error: 'bookingId required' })
 // Server-side source of truth for amounts and owner — never trust the client for money values.
 const { data: booking, error: bookingError } = await supabase
 .from('bookings')
-.select('id, hirer_id, owner_id, total_amount, deposit_amount, platform_fee, stripe_payment_intent_id, referral_credit_applied_at, listings(country)')
+.select('id, hirer_id, owner_id, total_amount, deposit_amount, platform_fee, stripe_payment_intent_id, referral_credit_applied_at, promo_fee_applied_at, listings(country)')
 .eq('id', bookingId)
 .maybeSingle()
 if (bookingError) {
@@ -555,7 +555,7 @@ console.error('Existing PI retrieve failed, creating new one:', e.message)
 // Look up the owner's Stripe Connect account server-side — never trust client-supplied ownerStripeId
 const { data: ownerProfile, error: ownerError } = await supabase
 .from('profiles')
-.select('stripe_account_id, stripe_charges_enabled, referral_fee_credits')
+.select('stripe_account_id, stripe_charges_enabled, referral_fee_credits, created_at')
 .eq('id', booking.owner_id)
 .maybeSingle()
 if (ownerError) {
@@ -575,18 +575,43 @@ const totalUnits = toSmallestUnit(booking.total_amount || 0, currencyCode)
 const depositUnits = toSmallestUnit(booking.deposit_amount || 0, currencyCode)
 const hireUnits = totalUnits - depositUnits
 
-// Referral fee discount: if the owner has unused referral credits, charge 10% instead of 12%
-// and consume one credit. Idempotent per booking: if a credit was already applied to this booking
-// (referral_credit_applied_at is set), apply the same 10% rate without decrementing again — so a
-// cancel-and-retry on the same booking re-creates the PI with the same discount.
+// ── Fee rate decision: promo (8%) > referral (10%) > standard (12%) ─────────
+// First-hire promo: new owners within 30 days of signup with no prior completed
+// hires as lister get 8%. Idempotent: if promo_fee_applied_at is already stamped
+// on this booking (cancel-and-retry path), reuse 8% without re-checking.
 let feeRate = PLATFORM_FEE_PERCENT
 let consumeCredit = false
-if (booking.referral_credit_applied_at) {
-  feeRate = 0.10
-} else if ((ownerProfile.referral_fee_credits || 0) > 0) {
-  feeRate = 0.10
-  consumeCredit = true
+let applyPromo = false
+
+if (booking.promo_fee_applied_at) {
+  // Retry path: promo was already stamped on a prior PI-creation attempt
+  feeRate = 0.08
+} else {
+  // Check eligibility: owner within 30-day signup window AND zero prior completed hires
+  const promoWindowEnd = new Date(new Date(ownerProfile.created_at).getTime() + 30 * 24 * 60 * 60 * 1000)
+  if (new Date() < promoWindowEnd) {
+    const { count, error: countError } = await supabase
+      .from('bookings')
+      .select('id', { count: 'exact', head: true })
+      .eq('owner_id', booking.owner_id)
+      .eq('status', 'completed')
+    if (!countError && count === 0) {
+      feeRate = 0.08
+      applyPromo = true
+    }
+  }
 }
+
+// Referral credit only applies when promo is not in play
+if (!applyPromo && !booking.promo_fee_applied_at) {
+  if (booking.referral_credit_applied_at) {
+    feeRate = 0.10
+  } else if ((ownerProfile.referral_fee_credits || 0) > 0) {
+    feeRate = 0.10
+    consumeCredit = true
+  }
+}
+
 const platformFeeUnits = Math.round(hireUnits * feeRate)
 
 const paymentIntent = await stripe.paymentIntents.create({
@@ -610,7 +635,41 @@ if (bindError) {
 console.error('Failed to bind PI to booking:', bindError)
 }
 
-console.log(`💸 Fee rate ${feeRate} for booking ${bookingId} (${consumeCredit ? 'consuming credit' : booking.referral_credit_applied_at ? 'credit already applied on prior attempt' : 'no credit'})`)
+const feeReason = applyPromo ? 'first-hire promo'
+  : booking.promo_fee_applied_at ? 'promo already applied on prior attempt'
+  : consumeCredit ? 'consuming referral credit'
+  : booking.referral_credit_applied_at ? 'referral credit already applied on prior attempt'
+  : 'no discount'
+console.log(`💸 Fee rate ${feeRate * 100}% for booking ${bookingId} (${feeReason})`)
+
+if (applyPromo) {
+  try {
+    const now = new Date().toISOString()
+    // Step 1: stamp promo_fee_applied_at — this is a new column not covered by the
+    // immutable-columns trigger, so it always succeeds. The stamp makes subsequent
+    // retries idempotent (they re-enter the booking.promo_fee_applied_at branch above).
+    const { error: stampErr } = await supabase
+      .from('bookings')
+      .update({ promo_fee_applied_at: now })
+      .eq('id', bookingId)
+    if (stampErr) throw stampErr
+
+    // Step 2: correct stored platform_fee/owner_payout to 8% (not the 12% estimate
+    // the frontend wrote at booking-creation time). This requires the
+    // bookings_lock_immutable_columns trigger to include the promo exception —
+    // see SQL migration Part B. Logged but non-fatal if the trigger hasn't been updated yet.
+    const hireAUD = (booking.total_amount || 0) - (booking.deposit_amount || 0)
+    const promoPlatformFee = Math.round(hireAUD * 0.08 * 100) / 100
+    const promoOwnerPayout = Math.round((hireAUD - promoPlatformFee) * 100) / 100
+    const { error: feeErr } = await supabase
+      .from('bookings')
+      .update({ platform_fee: promoPlatformFee, owner_payout: promoOwnerPayout })
+      .eq('id', bookingId)
+    if (feeErr) console.error('Promo financial correction failed (trigger not yet updated?):', feeErr.message)
+  } catch (e) {
+    console.error('Promo stamp error (PI already created, payment proceeds):', e)
+  }
+}
 
 if (consumeCredit) {
   try {
@@ -668,9 +727,11 @@ if (!booking) return
 // if listings.country were ever mutated after PI creation, but adds a round-trip to every cancel-with-fee.
 const currencyCode = getCurrencyCode(booking.listings?.country)
 const amountToCaptureUnits = toSmallestUnit(amountToCaptureAUD, currencyCode)
-// Recompute platform fee against captured forfeit (not full-hire amount baked at PI creation).
-// Same rate rule as PI creation: referral_credit_applied_at → 10%, else PLATFORM_FEE_PERCENT.
-const feeRate = booking.referral_credit_applied_at ? 0.10 : PLATFORM_FEE_PERCENT
+// Recompute platform fee against captured amount (overrides the PI's initial estimate).
+// Priority matches PI creation: promo (8%) > referral (10%) > standard (12%).
+const feeRate = booking.promo_fee_applied_at ? 0.08
+              : booking.referral_credit_applied_at ? 0.10
+              : PLATFORM_FEE_PERCENT
 const platformFeeUnits = Math.round(amountToCaptureUnits * feeRate)
 const paymentIntent = await stripe.paymentIntents.capture(paymentIntentId, {
 amount_to_capture: amountToCaptureUnits,
