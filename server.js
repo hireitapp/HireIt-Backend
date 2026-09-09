@@ -992,6 +992,7 @@ return `
 <p style="margin:0 0 16px;color:#5A6079;">We're spreading the word and growing steadily across the country, and it'd be great to have ${suburb} as part of that. ${listingPitch}</p>
 <p style="margin:0 0 16px;color:#5A6079;">There's also a referral link in your profile dropdown if you'd like to invite friends or family — referring someone gets you a reduced platform fee on your next 3 hires once they complete their first.</p>
 <p style="margin:0 0 16px;color:#5A6079;">We're building a HireIt community, so if you have any questions, feedback or suggestions, please reach out directly. Thanks for being part of it early on!</p>
+<p style="margin:0 0 16px;color:#5A6079;">💳 Quick heads up: your listing won't be bookable until you connect your bank details via Stripe. You can set this up any time from your profile — it only takes a few minutes.</p>
 ${ctaButton('https://hireitnow.au', 'Explore HireIt')}
 <p style="margin:24px 0 0;color:#5A6079;font-size:14px;">— The HireIt Team</p>
 `
