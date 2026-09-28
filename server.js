@@ -1103,5 +1103,116 @@ ${mainContent}
 `
 }
 
+// ── Stripe setup nudge (called daily by Vercel cron via x-cron-secret) ──
+// Email 1: listers with at least one listing older than 24 h who haven't
+//          completed Stripe Connect (stripe_nudge_count = 0).
+// Email 2: reminder 4 days later if still not set up (stripe_nudge_count = 1).
+// Never sends more than 2 emails per user. Skips admins and internal addresses.
+app.post('/stripe-setup-nudge', async (req, res) => {
+  const secret = req.headers['x-cron-secret']
+  if (!secret || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const EXCLUDED_EMAILS = new Set([
+    'hello@hireitnow.au',
+    'ky@kcroofplumbing.com.au',
+    'kyvibe69@gmail.com',
+  ])
+
+  try {
+    const now = new Date()
+    const oneDayAgo   = new Date(now.getTime() -  1 * 24 * 60 * 60 * 1000).toISOString()
+    const fourDaysAgo = new Date(now.getTime() -  4 * 24 * 60 * 60 * 1000).toISOString()
+
+    // Cohort 1 - first email:
+    // owner_ids who have at least one listing created more than 24 h ago
+    const { data: eligibleListings, error: listingsError } = await supabase
+      .from('listings')
+      .select('owner_id')
+      .lt('created_at', oneDayAgo)
+    if (listingsError) throw listingsError
+
+    const eligibleOwnerIds = [...new Set((eligibleListings || []).map(l => l.owner_id))]
+
+    let firstCohort = []
+    if (eligibleOwnerIds.length > 0) {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, stripe_nudge_count, is_admin')
+        .in('id', eligibleOwnerIds)
+        .eq('stripe_nudge_count', 0)
+        .or('stripe_charges_enabled.is.null,stripe_charges_enabled.is.false')
+      if (error) throw error
+      firstCohort = data || []
+    }
+
+    // Cohort 2 - reminder:
+    // sent first email 4+ days ago and still not set up
+    const { data: reminderCohort, error: reminderError } = await supabase
+      .from('profiles')
+      .select('id, full_name, stripe_nudge_count, is_admin')
+      .eq('stripe_nudge_count', 1)
+      .lt('stripe_nudge_last_sent_at', fourDaysAgo)
+      .or('stripe_charges_enabled.is.null,stripe_charges_enabled.is.false')
+    if (reminderError) throw reminderError
+
+    // Overlap between cohorts is impossible (count 0 vs 1) - merge is a safety net
+    const allUsers = [...firstCohort, ...(reminderCohort || [])]
+
+    let sent = 0
+    let skipped = 0
+
+    for (const profile of allUsers) {
+      if (profile.is_admin) { skipped++; continue }
+
+      try {
+        const { data: userData } = await supabase.auth.admin.getUserById(profile.id)
+        const email = userData?.user?.email
+        if (!email || EXCLUDED_EMAILS.has(email)) { skipped++; continue }
+
+        const firstName = profile.full_name?.split(' ')[0] || 'there'
+        await resend.emails.send({
+          from: 'HireIt <hello@hireitnow.au>',
+          to: email,
+          subject: 'One quick step to get paid on HireIt',
+          html: emailLayout(buildStripeNudgeBody(firstName)),
+        })
+
+        await new Promise(r => setTimeout(r, 600))
+
+        await supabase.from('profiles').update({
+          stripe_nudge_count: profile.stripe_nudge_count + 1,
+          stripe_nudge_last_sent_at: now.toISOString(),
+        }).eq('id', profile.id)
+
+        sent++
+        console.log(`📧 Stripe nudge #${profile.stripe_nudge_count + 1} sent to ${email}`)
+      } catch (err) {
+        console.error(`Stripe nudge error for user ${profile.id}:`, err.message)
+        skipped++
+      }
+    }
+
+    res.json({ sent, skipped })
+  } catch (err) {
+    console.error('Stripe setup nudge error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+function buildStripeNudgeBody(firstName) {
+  return `
+<h2 style="color:#0F1E4A;margin:0 0 16px;font-size:22px;">One quick step to get paid on HireIt</h2>
+<p style="margin:0 0 16px;color:#14172B;">Hi ${firstName},</p>
+<p style="margin:0 0 16px;color:#5A6079;">Thanks for listing on HireIt - your item is looking great!</p>
+<p style="margin:0 0 16px;color:#5A6079;">There's one quick step left: setting up your payouts through Stripe, our secure payment provider. Until this is done, hirers won't be able to pay for a booking - so you can't accept hires or get paid.</p>
+<p style="margin:0 0 16px;color:#5A6079;">It takes about 5 minutes. Just have your driver's licence and bank details handy - Stripe needs these by law to pay you securely.</p>
+${ctaButton('https://hireitnow.au/payouts', 'Complete my payout setup')}
+<p style="margin:24px 0 0;color:#5A6079;font-size:14px;">Any questions, just reply to this email.</p>
+<p style="margin:8px 0 0;color:#5A6079;font-size:14px;">Cheers,<br>Ky<br>HireIt</p>
+`
+}
+
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`HireIt backend running on port ${PORT}`))
