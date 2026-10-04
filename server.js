@@ -516,7 +516,7 @@ if (!bookingId) return res.status(400).json({ error: 'bookingId required' })
 // Server-side source of truth for amounts and owner — never trust the client for money values.
 const { data: booking, error: bookingError } = await supabase
 .from('bookings')
-.select('id, hirer_id, owner_id, total_amount, deposit_amount, platform_fee, stripe_payment_intent_id, referral_credit_applied_at, promo_fee_applied_at, listings(country)')
+.select('id, hirer_id, owner_id, total_amount, deposit_amount, platform_fee, stripe_payment_intent_id, referral_credit_applied_at, promo_fee_applied_at, listings(country, admin_disabled)')
 .eq('id', bookingId)
 .maybeSingle()
 if (bookingError) {
@@ -524,6 +524,11 @@ console.error('Booking lookup failed:', bookingError)
 return res.status(500).json({ error: 'Booking lookup failed' })
 }
 if (!booking) return res.status(404).json({ error: 'Booking not found' })
+
+// Reject payment if the listing has been admin-disabled
+if (booking.listings?.admin_disabled) {
+return res.status(400).json({ error: 'This listing has been disabled by HireIt and cannot be booked. Please contact support at hello@hireitnow.au.' })
+}
 
 // Only the hirer may create a payment intent for this booking
 if (req.userId !== booking.hirer_id) return res.status(403).json({ error: 'Forbidden' })
