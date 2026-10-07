@@ -48,6 +48,7 @@ const getStripeWebhookSecrets = () => {
 const getStripe = () => require('stripe')(getStripeSecretKey())
 
 const { createClient } = require('@supabase/supabase-js')
+const cron = require('node-cron')
 
 // Service-role client — bypasses RLS so the webhook can write to bookings
 // regardless of which user (or no user) is logged in. Service-role key is
@@ -528,6 +529,27 @@ if (!booking) return res.status(404).json({ error: 'Booking not found' })
 // Reject payment if the listing has been admin-disabled
 if (booking.listings?.admin_disabled) {
 return res.status(400).json({ error: 'This listing has been disabled by HireIt and cannot be booked. Please contact support at hello@hireitnow.au.' })
+}
+
+// Reject bookings longer than 5 days — Stripe auth holds expire after ~7 days; 5-day cap provides buffer
+if ((booking.hours || 0) > 120) {
+return res.status(400).json({ error: 'Bookings are limited to 5 days. This booking cannot be processed — please contact the other party to arrange a new booking.' })
+}
+
+// Reject payment if the card hold would expire before the hire ends.
+// Hold must survive from now until the hire end date; cap at 5 days to give a 2-day buffer.
+if (booking.start_date && booking.hours) {
+const hireEnd = new Date(booking.start_date)
+hireEnd.setDate(hireEnd.getDate() + Math.ceil(booking.hours / 24))
+const daysToEnd = Math.ceil((hireEnd - new Date()) / (1000 * 60 * 60 * 24))
+if (daysToEnd > 5) {
+const earliest = new Date(hireEnd)
+earliest.setDate(earliest.getDate() - 5)
+return res.status(400).json({
+error: `Payment cannot be taken this far ahead — the card hold would expire before the hire ends. Payment can be taken from ${earliest.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}.`,
+code: 'payment_too_early',
+})
+}
 }
 
 // Only the hirer may create a payment intent for this booking
@@ -1219,5 +1241,288 @@ ${ctaButton('https://hireitnow.au/payouts', 'Complete my payout setup')}
 `
 }
 
+// ── Auto-capture expiring holds ───────────────────────────────────────────────
+// Three phases (all require payment_status='authorised' and hire ended ≥ 12 hrs ago):
+// 1. Warn     — owner silent, no dispute, warning not sent → email owner, stamp auto_capture_warning_sent_at
+// 2. Capture  — warned 12+ hrs ago, owner still silent, no dispute → capture hire amount, email both parties
+// 3. Escalate — dispute/explicit disagreement + hold 4+ days old + not yet escalated → urgent admin email,
+//               stamp dispute_escalated_at (separate from auto_capture_warning_sent_at so a post-warning
+//               dispute is still caught)
+// Called by the HTTP route (manual/cron via Vercel) AND by the node-cron schedule below.
+async function runAutoCaptureExpiring() {
+  const now = new Date()
+  const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000)
+  const fourDaysAgo = new Date(now.getTime() - 4 * 24 * 60 * 60 * 1000)
+  const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'hello@hireitnow.au'
+
+  const { data: bookings, error: bookingsError } = await supabase
+    .from('bookings')
+    .select('id, hirer_id, owner_id, start_date, hours, total_amount, deposit_amount, paid_at, stripe_payment_intent_id, owner_return_agreed, dispute_reason, auto_capture_warning_sent_at, dispute_escalated_at, promo_fee_applied_at, referral_credit_applied_at, listings(title, country)')
+    .eq('payment_status', 'authorised')
+
+  if (bookingsError) throw bookingsError
+  if (!bookings?.length) return { warned: 0, captured: 0, escalated: 0, message: 'No authorised bookings' }
+
+  const getHireEnd = (b) => new Date(new Date(b.start_date).getTime() + (b.hours || 0) * 60 * 60 * 1000)
+
+  const toWarn = []
+  const toCapture = []
+  const toEscalate = []
+
+  for (const b of bookings) {
+    if (getHireEnd(b) > twelveHoursAgo) continue
+    const ownerSilent = b.owner_return_agreed === null
+    const hasDispute = b.dispute_reason !== null
+    const ownerExplicitlyDisagreed = b.owner_return_agreed === false
+
+    if (hasDispute || ownerExplicitlyDisagreed) {
+      const holdOldEnough = b.paid_at && new Date(b.paid_at) < fourDaysAgo
+      if (holdOldEnough && b.dispute_escalated_at === null) {
+        toEscalate.push(b)
+      }
+    } else if (ownerSilent) {
+      if (b.auto_capture_warning_sent_at === null) {
+        toWarn.push(b)
+      } else if (new Date(b.auto_capture_warning_sent_at) < twelveHoursAgo) {
+        toCapture.push(b)
+      }
+    }
+  }
+
+  let warned = 0, captured = 0, escalated = 0
+  const stripe = getStripe()
+
+  // Phase 1: Warn owners who haven't confirmed return
+  for (const b of toWarn) {
+    try {
+      const { data: ownerData } = await supabase.auth.admin.getUserById(b.owner_id)
+      const ownerEmail = ownerData?.user?.email
+      if (!ownerEmail) { console.log(`No email for owner ${b.owner_id}, skipping`); continue }
+      const [{ data: ownerProfile }, { data: hirerProfile }] = await Promise.all([
+        supabase.from('profiles').select('full_name').eq('id', b.owner_id).single(),
+        supabase.from('profiles').select('full_name').eq('id', b.hirer_id).single(),
+      ])
+      const ownerFirstName = ownerProfile?.full_name?.split(' ')[0] || 'there'
+      const hirerName = hirerProfile?.full_name || 'Your hirer'
+      const itemTitle = b.listings?.title || 'your item'
+
+      await resend.emails.send({
+        from: 'HireIt <hello@hireitnow.au>',
+        to: ownerEmail,
+        subject: `Action needed: confirm the return of ${itemTitle}`,
+        html: emailLayout(buildOwnerReturnWarningBody(ownerFirstName, hirerName, itemTitle)),
+      })
+
+      await supabase.from('bookings').update({ auto_capture_warning_sent_at: now.toISOString() }).eq('id', b.id)
+      warned++
+      console.log(`⚠️  Return warning sent to owner ${ownerEmail} for booking ${b.id}`)
+    } catch (err) {
+      console.error(`Warning phase error for booking ${b.id}:`, err.message)
+    }
+  }
+
+  // Phase 2: Auto-capture where owner has been silent for 12+ hours after warning
+  for (const b of toCapture) {
+    try {
+      const hireSubtotal = (b.total_amount || 0) - (b.deposit_amount || 0)
+      const currencyCode = getCurrencyCode(b.listings?.country)
+      const amountToCaptureUnits = toSmallestUnit(hireSubtotal, currencyCode)
+      const feeRate = b.promo_fee_applied_at ? 0.08 : b.referral_credit_applied_at ? 0.10 : PLATFORM_FEE_PERCENT
+      const platformFeeUnits = Math.round(amountToCaptureUnits * feeRate)
+
+      await stripe.paymentIntents.capture(b.stripe_payment_intent_id, {
+        amount_to_capture: amountToCaptureUnits,
+        application_fee_amount: platformFeeUnits,
+      })
+
+      await supabase.from('bookings').update({
+        status: 'completed',
+        payment_status: 'captured',
+        payment_captured_at: now.toISOString(),
+      }).eq('id', b.id)
+
+      const itemTitle = b.listings?.title || 'the item'
+      const [{ data: ownerData }, { data: hirerData }] = await Promise.all([
+        supabase.auth.admin.getUserById(b.owner_id),
+        supabase.auth.admin.getUserById(b.hirer_id),
+      ])
+      const [{ data: ownerProfile }, { data: hirerProfile }] = await Promise.all([
+        supabase.from('profiles').select('full_name').eq('id', b.owner_id).single(),
+        supabase.from('profiles').select('full_name').eq('id', b.hirer_id).single(),
+      ])
+
+      const ownerEmail = ownerData?.user?.email
+      const hirerEmail = hirerData?.user?.email
+      const ownerFirstName = ownerProfile?.full_name?.split(' ')[0] || 'there'
+      const hirerFirstName = hirerProfile?.full_name?.split(' ')[0] || 'there'
+
+      if (ownerEmail) {
+        await resend.emails.send({
+          from: 'HireIt <hello@hireitnow.au>',
+          to: ownerEmail,
+          subject: `Payment released for ${itemTitle}`,
+          html: emailLayout(buildOwnerCaptureBody(ownerFirstName, itemTitle, hireSubtotal)),
+        })
+      }
+      if (hirerEmail) {
+        await resend.emails.send({
+          from: 'HireIt <hello@hireitnow.au>',
+          to: hirerEmail,
+          subject: `Your hire of ${itemTitle} is complete`,
+          html: emailLayout(buildHirerCaptureBody(hirerFirstName, itemTitle, b.deposit_amount || 0)),
+        })
+      }
+
+      captured++
+      console.log(`💰 Auto-captured booking ${b.id} (${hireSubtotal} ${currencyCode.toUpperCase()})`)
+    } catch (err) {
+      if (err.code === 'payment_intent_unexpected_state') {
+        console.log(`⚠️  Auto-capture noop for booking ${b.id} — PI already in terminal state (${err.payment_intent?.status})`)
+      } else {
+        console.error(`Capture phase error for booking ${b.id}:`, err.message)
+        try {
+          await resend.emails.send({
+            from: 'HireIt <hello@hireitnow.au>',
+            to: ADMIN_EMAIL,
+            subject: `ACTION REQUIRED: Auto-capture failed — booking ${b.id}`,
+            html: emailLayout(`
+<h2 style="color:#DC2626;margin:0 0 16px;font-size:22px;">Auto-capture failed — manual action needed</h2>
+<p style="margin:0 0 16px;color:#14172B;">The automatic payment capture for a booking failed. The Stripe hold may have expired. Please review and collect payment manually if needed.</p>
+${infoCard([
+  { label: 'Booking ID', val: b.id },
+  { label: 'Item', val: b.listings?.title || 'unknown' },
+  { label: 'Error', val: err.message },
+])}
+${ctaButton('https://hireitnow.au/admin', 'Review in Admin')}
+`),
+          })
+        } catch (emailErr) {
+          console.error(`Failed to send capture-failure alert for booking ${b.id}:`, emailErr.message)
+        }
+      }
+    }
+  }
+
+  // Phase 3: Escalate disputes to admin (once only, when hold is 4+ days old)
+  for (const b of toEscalate) {
+    try {
+      const itemTitle = b.listings?.title || 'unknown item'
+      const [{ data: ownerProfile }, { data: hirerProfile }] = await Promise.all([
+        supabase.from('profiles').select('full_name').eq('id', b.owner_id).single(),
+        supabase.from('profiles').select('full_name').eq('id', b.hirer_id).single(),
+      ])
+      const ownerName = ownerProfile?.full_name || 'Unknown'
+      const hirerName = hirerProfile?.full_name || 'Unknown'
+
+      await resend.emails.send({
+        from: 'HireIt <hello@hireitnow.au>',
+        to: ADMIN_EMAIL,
+        subject: `URGENT: Disputed return near payment expiry — ${itemTitle}`,
+        html: emailLayout(buildDisputeEscalationBody(b.id, itemTitle, ownerName, hirerName, b.dispute_reason, b.owner_return_agreed)),
+      })
+
+      await supabase.from('bookings').update({ dispute_escalated_at: now.toISOString() }).eq('id', b.id)
+      escalated++
+      console.log(`🚨 Dispute escalation sent to admin for booking ${b.id}`)
+    } catch (err) {
+      console.error(`Escalation phase error for booking ${b.id}:`, err.message)
+    }
+  }
+
+  return { warned, captured, escalated }
+}
+
+app.post('/auto-capture-expiring', async (req, res) => {
+  const secret = req.headers['x-cron-secret']
+  if (!secret || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  try {
+    const result = await runAutoCaptureExpiring()
+    res.json(result)
+  } catch (err) {
+    console.error('Auto-capture expiring error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+function buildOwnerReturnWarningBody(ownerFirstName, hirerName, itemTitle) {
+  return `
+<h2 style="color:#0F1E4A;margin:0 0 16px;font-size:22px;">Please confirm the return of ${itemTitle}</h2>
+<p style="margin:0 0 16px;color:#14172B;">Hi ${ownerFirstName},</p>
+<p style="margin:0 0 16px;color:#5A6079;">The hire period for <strong>${itemTitle}</strong> has ended and ${hirerName} should have returned the item by now.</p>
+<p style="margin:0 0 16px;color:#5A6079;">Please head to Messages and confirm the item has been returned in good condition so your payment can be released.</p>
+<p style="margin:0 0 16px;color:#D97706;font-weight:600;">⚠️ If we don't hear from you within 12 hours, payment will be released automatically.</p>
+${ctaButton('https://hireitnow.au/messages', 'Confirm in Messages')}
+<p style="margin:24px 0 0;color:#5A6079;font-size:14px;">If there's a problem with the return, please raise a dispute in the Messages thread before that time.</p>
+<p style="margin:8px 0 0;color:#5A6079;font-size:14px;">Cheers,<br>The HireIt Team</p>
+`
+}
+
+function buildOwnerCaptureBody(ownerFirstName, itemTitle, hireSubtotal) {
+  return `
+<h2 style="color:#0F1E4A;margin:0 0 16px;font-size:22px;">Payment released for ${itemTitle}</h2>
+<p style="margin:0 0 16px;color:#14172B;">Hi ${ownerFirstName},</p>
+<p style="margin:0 0 16px;color:#5A6079;">We didn't receive your confirmation that <strong>${itemTitle}</strong> was returned, so we've automatically released payment as per our policy.</p>
+${infoCard([{ label: 'Item', val: itemTitle }, { label: 'Amount released', val: `$${hireSubtotal.toFixed(2)}` }])}
+<p style="margin:0 0 16px;color:#5A6079;">Funds will appear in your Stripe account within 1–3 business days. If you have any concerns, please get in touch.</p>
+${ctaButton('https://hireitnow.au/payouts', 'View my payouts')}
+<p style="margin:24px 0 0;color:#5A6079;font-size:14px;">Any questions? Just reply to this email.</p>
+<p style="margin:8px 0 0;color:#5A6079;font-size:14px;">Cheers,<br>The HireIt Team</p>
+`
+}
+
+function buildHirerCaptureBody(hirerFirstName, itemTitle, depositAmount) {
+  const depositLine = depositAmount > 0
+    ? `<p style="margin:0 0 16px;color:#5A6079;">Your security deposit of <strong>$${depositAmount.toFixed(2)}</strong> has been released back to your card — allow 5–10 business days to appear.</p>`
+    : ''
+  return `
+<h2 style="color:#0F1E4A;margin:0 0 16px;font-size:22px;">Your hire of ${itemTitle} is complete</h2>
+<p style="margin:0 0 16px;color:#14172B;">Hi ${hirerFirstName},</p>
+<p style="margin:0 0 16px;color:#5A6079;">Your hire of <strong>${itemTitle}</strong> is now complete and payment has been finalised.</p>
+${depositLine}
+<p style="margin:0 0 16px;color:#5A6079;">Hope the hire went well! If you'd like to leave a review for the owner, you can do so from your bookings.</p>
+${ctaButton('https://hireitnow.au/my-bookings', 'View my bookings')}
+<p style="margin:24px 0 0;color:#5A6079;font-size:14px;">Any questions? Just reply to this email.</p>
+<p style="margin:8px 0 0;color:#5A6079;font-size:14px;">Cheers,<br>The HireIt Team</p>
+`
+}
+
+function buildDisputeEscalationBody(bookingId, itemTitle, ownerName, hirerName, disputeReason, ownerReturnAgreed) {
+  const reason = disputeReason
+    || (ownerReturnAgreed === false ? 'Owner explicitly disagreed with return (no dispute reason recorded)' : 'Unknown')
+  return `
+<h2 style="color:#DC2626;margin:0 0 16px;font-size:22px;">⚠️ Disputed return — payment expiry approaching</h2>
+<p style="margin:0 0 16px;color:#14172B;">A booking has a disputed return and the Stripe hold is approaching expiry. Manual review required.</p>
+${infoCard([
+  { label: 'Booking ID', val: bookingId },
+  { label: 'Item', val: itemTitle },
+  { label: 'Owner', val: ownerName },
+  { label: 'Hirer', val: hirerName },
+  { label: 'Issue', val: reason },
+])}
+${ctaButton('https://hireitnow.au/admin', 'Review in Admin')}
+`
+}
+
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => console.log(`HireIt backend running on port ${PORT}`))
+
+// ── Auto-capture cron (06:00 and 18:00 UTC daily) ─────────────────────────────
+let autoCaptureRunning = false
+cron.schedule('0 6,18 * * *', async () => {
+  if (autoCaptureRunning) {
+    console.log('⏭️  Auto-capture cron: previous run still in progress, skipping')
+    return
+  }
+  autoCaptureRunning = true
+  console.log(`🕐 Auto-capture cron: starting at ${new Date().toISOString()}`)
+  try {
+    const result = await runAutoCaptureExpiring()
+    console.log(`✅ Auto-capture cron: warned=${result.warned}, captured=${result.captured}, escalated=${result.escalated}`)
+  } catch (err) {
+    console.error('❌ Auto-capture cron failed:', err.message)
+  } finally {
+    autoCaptureRunning = false
+  }
+}, { timezone: 'UTC' })
